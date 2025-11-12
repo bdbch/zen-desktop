@@ -19,6 +19,115 @@ window.gZenOperatingSystemCommonUtils = {
 class nsZenMultiWindowFeature {
   constructor() {}
 
+  static #windows = new Set();
+  static #mainWindow = null;
+
+  static registerWindow(browserWindow) {
+    if (!browserWindow || browserWindow.closed) {
+      return;
+    }
+
+    if (nsZenMultiWindowFeature.#windows.has(browserWindow)) {
+      nsZenMultiWindowFeature.#ensureMainWindow();
+      return;
+    }
+
+    nsZenMultiWindowFeature.#windows.add(browserWindow);
+
+    const onUnload = () => {
+      nsZenMultiWindowFeature.#windows.delete(browserWindow);
+      if (nsZenMultiWindowFeature.#mainWindow === browserWindow) {
+        nsZenMultiWindowFeature.#mainWindow = null;
+        nsZenMultiWindowFeature.#promoteNewMainWindow();
+      }
+    };
+
+    browserWindow.addEventListener('unload', onUnload, { once: true });
+
+    nsZenMultiWindowFeature.#ensureMainWindow();
+
+    if (!nsZenMultiWindowFeature.#mainWindow) {
+      nsZenMultiWindowFeature.#setMainWindow(browserWindow);
+      return;
+    }
+
+    if (nsZenMultiWindowFeature.#mainWindow !== browserWindow) {
+      nsZenMultiWindowFeature.#setWindowMode(browserWindow, 'minimal');
+    }
+  }
+
+  static #ensureMainWindow() {
+    if (nsZenMultiWindowFeature.#mainWindow?.closed) {
+      nsZenMultiWindowFeature.#mainWindow = null;
+    }
+    if (!nsZenMultiWindowFeature.#mainWindow && nsZenMultiWindowFeature.#windows.size) {
+      nsZenMultiWindowFeature.#promoteNewMainWindow();
+    }
+  }
+
+  static #promoteNewMainWindow() {
+    const candidate = Services.wm.getMostRecentWindow('navigator:browser');
+    if (candidate && !candidate.closed && nsZenMultiWindowFeature.#windows.has(candidate)) {
+      nsZenMultiWindowFeature.#setMainWindow(candidate);
+      return;
+    }
+
+    for (const browser of nsZenMultiWindowFeature.#windows) {
+      if (!browser.closed) {
+        nsZenMultiWindowFeature.#setMainWindow(browser);
+        return;
+      }
+    }
+  }
+
+  static #setMainWindow(browserWindow) {
+    if (!browserWindow || browserWindow.closed) {
+      return;
+    }
+
+    if (nsZenMultiWindowFeature.#mainWindow && nsZenMultiWindowFeature.#mainWindow !== browserWindow) {
+      nsZenMultiWindowFeature.#setWindowMode(nsZenMultiWindowFeature.#mainWindow, 'minimal');
+    }
+
+    nsZenMultiWindowFeature.#mainWindow = browserWindow;
+    nsZenMultiWindowFeature.#setWindowMode(browserWindow, 'main');
+  }
+
+  static #setWindowMode(browserWindow, mode) {
+    if (!browserWindow || browserWindow.closed) {
+      return;
+    }
+
+    const docEl = browserWindow.document?.documentElement;
+    if (!docEl) {
+      return;
+    }
+
+    let shouldDispatch = false;
+
+    if (mode === 'main') {
+      if (docEl.getAttribute('zen-main-window') !== 'true') {
+        shouldDispatch = true;
+      }
+      docEl.setAttribute('zen-main-window', 'true');
+      docEl.removeAttribute('zen-minimal-window');
+    } else {
+      if (!docEl.hasAttribute('zen-minimal-window')) {
+        shouldDispatch = true;
+      }
+      docEl.removeAttribute('zen-main-window');
+      docEl.setAttribute('zen-minimal-window', 'true');
+    }
+
+    if (shouldDispatch) {
+      browserWindow.dispatchEvent(
+        new browserWindow.CustomEvent('ZenWindowModeChanged', {
+          detail: { mode },
+        })
+      );
+    }
+  }
+
   static get browsers() {
     return Services.wm.getEnumerator('navigator:browser');
   }
@@ -27,8 +136,28 @@ class nsZenMultiWindowFeature {
     return Services.wm.getMostRecentWindow('navigator:browser');
   }
 
+  static get mainBrowser() {
+    nsZenMultiWindowFeature.#ensureMainWindow();
+    return nsZenMultiWindowFeature.#mainWindow;
+  }
+
   static get isActiveWindow() {
     return nsZenMultiWindowFeature.currentBrowser === window;
+  }
+
+  static isMainWindow(browserWindow = window) {
+    nsZenMultiWindowFeature.#ensureMainWindow();
+    return nsZenMultiWindowFeature.#mainWindow === browserWindow && !browserWindow.closed;
+  }
+
+  static isMinimalWindow(browserWindow = window) {
+    if (!browserWindow || browserWindow.closed) {
+      return false;
+    }
+    if (nsZenMultiWindowFeature.isMainWindow(browserWindow)) {
+      return false;
+    }
+    return browserWindow.document?.documentElement?.hasAttribute('zen-minimal-window') ?? false;
   }
 
   windowIsActive(browser) {

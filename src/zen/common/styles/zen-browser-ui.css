@@ -31,6 +31,33 @@
   opacity: 0 !important;
 }
 
+:root[zen-minimal-window='true'] #zen-sidebar-top-buttons,
+:root[zen-minimal-window='true'] #zen-sidebar-top-buttons-separator,
+:root[zen-minimal-window='true'] #zen-essentials,
+:root[zen-minimal-window='true'] .zen-essentials-container,
+:root[zen-minimal-window='true'] .zen-workspace-pinned-tabs-section {
+  display: none !important;
+}
+
+:root[zen-minimal-window='true'] #zen-sidebar-top-buttons {
+  visibility: collapse !important;
+  min-height: 0 !important;
+  max-height: 0 !important;
+  padding: 0 !important;
+  border: 0 !important;
+}
+
+:root[zen-minimal-window='true'] #context_pinTab,
+:root[zen-minimal-window='true'] #context_unpinTab,
+:root[zen-minimal-window='true'] #context_unpinSelectedTabs,
+:root[zen-minimal-window='true'] #context_zen-add-essential,
+:root[zen-minimal-window='true'] #context_zen-remove-essential,
+:root[zen-minimal-window='true'] #context_zen-pinned-tab-separator,
+:root[zen-minimal-window='true'] #context_zen-reset-pinned-tab,
+:root[zen-minimal-window='true'] #context_zen-replace-pinned-url-with-current {
+  display: none !important;
+}
+
 #browser {
   background: transparent !important;
   width: 100%;

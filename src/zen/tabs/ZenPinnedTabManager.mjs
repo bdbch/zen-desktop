@@ -100,6 +100,10 @@
       }
     }
 
+    get isMinimalWindow() {
+      return nsZenMultiWindowFeature.isMinimalWindow(window);
+    }
+
     onTabIconChanged(tab, url = null) {
       const iconUrl = url ?? tab.iconImage.src;
       if (!iconUrl && tab.hasAttribute('zen-pin-id')) {
@@ -406,6 +410,13 @@
     _onPinnedTabEvent(action, event) {
       if (!this.enabled) return;
       const tab = event.target;
+      if (this.isMinimalWindow && action === 'TabPinned') {
+        if (tab.pinned) {
+          this._ignoreNextTabPinnedEvent = true;
+          gBrowser.unpinTab(tab);
+        }
+        return;
+      }
       if (this._ignoreNextTabPinnedEvent) {
         delete this._ignoreNextTabPinnedEvent;
         return;
@@ -994,6 +1005,9 @@
     }
 
     addToEssentials(tab) {
+      if (this.isMinimalWindow) {
+        return false;
+      }
       const tabs = tab
         ? // if it's already an array, dont make it [tab]
           tab?.length
@@ -1056,6 +1070,9 @@
     }
 
     removeEssentials(tab, unpin = true) {
+      if (this.isMinimalWindow) {
+        return false;
+      }
       const tabs = tab
         ? [tab]
         : TabContextMenu.contextTab.multiselected
@@ -1124,6 +1141,9 @@
         document.getElementById('context_pinTab').hidden = true;
         return;
       }
+      if (this.isMinimalWindow) {
+        return;
+      }
       const isVisible = contextTab.pinned && !contextTab.multiselected;
       document.getElementById('context_zen-reset-pinned-tab').hidden =
         !isVisible || !contextTab.getAttribute('zen-pin-id');
@@ -1153,6 +1173,9 @@
 
     moveToAnotherTabContainerIfNecessary(event, movingTabs) {
       if (!this.enabled) {
+        return false;
+      }
+      if (this.isMinimalWindow) {
         return false;
       }
       movingTabs = [...movingTabs];
@@ -1451,6 +1474,9 @@
     }
 
     canEssentialBeAdded(tab) {
+      if (this.isMinimalWindow) {
+        return false;
+      }
       return (
         !(
           (tab.getAttribute('usercontextid') || 0) !=
@@ -1462,6 +1488,9 @@
 
     applyDragoverClass(event, draggedTab) {
       if (!this.enabled) {
+        return;
+      }
+      if (this.isMinimalWindow) {
         return;
       }
       let isVertical = this.expandedSidebarMode;

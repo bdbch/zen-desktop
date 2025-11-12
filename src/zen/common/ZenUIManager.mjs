@@ -18,6 +18,10 @@ var gZenUIManager = {
 
     document.addEventListener('mousedown', this.handleMouseDown.bind(this), true);
 
+    window.addEventListener('ZenWindowModeChanged', () => {
+      this.updateTabsToolbar();
+    });
+
     ChromeUtils.defineLazyGetter(this, 'motion', () => {
       Services.scriptloader.loadSubScript(
         'chrome://browser/content/zen-vendor/motion.min.mjs',
