@@ -1087,6 +1087,11 @@ Preferences.addAll([
     default: true,
   },
   {
+    id: 'zen.view.hide-window-controls',
+    type: 'bool',
+    default: true,
+  },
+  {
     id: 'zen.workspaces.hide-default-container-indicator',
     type: 'bool',
     default: true,
