@@ -38,6 +38,10 @@ zen-look-and-feel-compact-view-top-toolbar =
     .label = 사이드바 축소 모드에서 상단 툴바 숨기기
 zen-look-and-feel-compact-toolbar-flash-popup = 
     .label = 사이드바 축소 모드에서 새 탭을 전환하거나 열 때 툴바를 간략하게 팝업으로 표시합니다
+
+zen-look-and-feel-hide-window-controls =
+    .label = 창 컨트롤 숨기기
+
 pane-zen-tabs-title = 탭 관리
 category-zen-workspaces = 
     .tooltiptext = { pane-zen-tabs-title }

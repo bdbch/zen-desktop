@@ -38,6 +38,10 @@ zen-look-and-feel-compact-view-top-toolbar =
     .label = Die obere Symbolleiste auch im Kompaktmodus ausblenden
 zen-look-and-feel-compact-toolbar-flash-popup = 
     .label = Symbolleiste im Kompaktmodus beim Wechseln oder Öffnen neuer Tabs kurz einblenden
+
+zen-look-and-feel-hide-window-controls =
+    .label = Fenstersteuerelemente ausblenden
+
 pane-zen-tabs-title = Tab-Verwaltung
 category-zen-workspaces = 
     .tooltiptext = { pane-zen-tabs-title }

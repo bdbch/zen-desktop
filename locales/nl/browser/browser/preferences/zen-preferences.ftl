@@ -38,6 +38,10 @@ zen-look-and-feel-compact-view-top-toolbar =
     .label = Verberg de bovenste werkbalk ook in compacte modus
 zen-look-and-feel-compact-toolbar-flash-popup = 
     .label = Laat kort de werkbalk zien bij het wisselen of openen van nieuwe tabbladen in compacte modus
+
+zen-look-and-feel-hide-window-controls =
+    .label = Vensterbesturingselementen verbergen
+
 pane-zen-tabs-title = Tabblad beheer
 category-zen-workspaces = 
     .tooltiptext = { pane-zen-tabs-title }

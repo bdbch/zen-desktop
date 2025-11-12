@@ -38,6 +38,10 @@ zen-look-and-feel-compact-view-top-toolbar =
     .label = A felső eszköztár is legyen elrejtve kompakt módban
 zen-look-and-feel-compact-toolbar-flash-popup = 
     .label = Eszköztár megjelenítése rövid ideig lap váltás vagy új megnyitása során kompakt módban
+
+zen-look-and-feel-hide-window-controls =
+    .label = Az ablakvezérlők elrejtése
+
 pane-zen-tabs-title = Lap kezelés
 category-zen-workspaces = 
     .tooltiptext = { pane-zen-tabs-title }

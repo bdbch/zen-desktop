@@ -38,6 +38,10 @@ zen-look-and-feel-compact-view-top-toolbar =
     .label = Peida ka ülemine tööriistariba kompaktses vaates
 zen-look-and-feel-compact-toolbar-flash-popup = 
     .label = Lühidalt kuva tööriistariba hüpikut kui lülitutakse kaartide vahel või avatakse uus kaart kompaktses režiimis
+
+zen-look-and-feel-hide-window-controls =
+    .label = Peida akna juhtnupud
+
 pane-zen-tabs-title = Kaartide haldamine
 category-zen-workspaces = 
     .tooltiptext = { pane-zen-tabs-title }

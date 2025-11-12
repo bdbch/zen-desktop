@@ -38,6 +38,10 @@ zen-look-and-feel-compact-view-top-toolbar =
     .label = Ukryj również górny pasek narzędzi w trybie kompaktowym
 zen-look-and-feel-compact-toolbar-flash-popup = 
     .label = Krótkie zrób wyskakujące okno paska narzędzi podczas przełączania lub otwierania nowych kart w trybie kompaktowym
+
+zen-look-and-feel-hide-window-controls =
+    .label = Ukryj elementy sterujące okna
+
 pane-zen-tabs-title = Zarządzanie kartami
 category-zen-workspaces = 
     .tooltiptext = { pane-zen-tabs-title }

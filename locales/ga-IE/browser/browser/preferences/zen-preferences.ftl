@@ -38,6 +38,10 @@ zen-look-and-feel-compact-view-top-toolbar =
     .label = Folaigh an barra uirlisí barr chomh maith i mód dlúth
 zen-look-and-feel-compact-toolbar-flash-popup = 
     .label = Déan preabfhuinneog an bharra uirlisí go hachomair agus cluaisíní nua á n-athrú nó á n-oscailt i mód dlúth
+
+zen-look-and-feel-hide-window-controls =
+    .label = Folaigh rialuithe na fuinneoige
+
 pane-zen-tabs-title = Bainistíocht Cluaisíní
 category-zen-workspaces = 
     .tooltiptext = { pane-zen-tabs-title }

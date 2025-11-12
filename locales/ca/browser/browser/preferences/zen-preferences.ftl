@@ -38,6 +38,10 @@ zen-look-and-feel-compact-view-top-toolbar =
     .label = Amaga també la barra d'eines superior en el mode compacte
 zen-look-and-feel-compact-toolbar-flash-popup = 
     .label = Fa que la barra d'eines aparegui breument quan canvieu o obriu noves pestanyes en el mode compacte
+
+zen-look-and-feel-hide-window-controls =
+    .label = Amaga els controls de la finestra
+
 pane-zen-tabs-title = Gestió de pestanyes
 category-zen-workspaces = 
     .tooltiptext = { pane-zen-tabs-title }

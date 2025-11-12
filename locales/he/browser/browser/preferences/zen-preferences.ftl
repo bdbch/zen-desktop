@@ -38,6 +38,10 @@ zen-look-and-feel-compact-view-top-toolbar =
     .label = הסתרת סרגל עליון גם במצב מכווץ
 zen-look-and-feel-compact-toolbar-flash-popup = 
     .label = הקפצה קצרה של סרגל הכלים במעבר או פתיחת כרטיסיות חדשות במצב מכווץ
+
+zen-look-and-feel-hide-window-controls =
+    .label = הסתרת בקרי החלון
+
 pane-zen-tabs-title = ניהול כרטיסיות
 category-zen-workspaces = 
     .tooltiptext = { pane-zen-tabs-title }

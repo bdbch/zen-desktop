@@ -38,6 +38,10 @@ zen-look-and-feel-compact-view-top-toolbar =
     .label = Скрыть верхнюю панель инструментов в компактном виде
 zen-look-and-feel-compact-toolbar-flash-popup = 
     .label = Временно отображать панель инструментов при переключении или открытии новых вкладок в компактном виде
+
+zen-look-and-feel-hide-window-controls =
+    .label = Скрыть элементы управления окном
+
 pane-zen-tabs-title = Управление вкладками
 category-zen-workspaces = 
     .tooltiptext = { pane-zen-tabs-title }

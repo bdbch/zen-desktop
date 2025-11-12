@@ -38,6 +38,10 @@ zen-look-and-feel-compact-view-top-toolbar =
     .label = Ocultar também a barra de ferramentas superior no modo compacto
 zen-look-and-feel-compact-toolbar-flash-popup = 
     .label = Exibir a barra de ferramentas brevemente ao alternar ou abrir novas guias no modo compacto
+
+zen-look-and-feel-hide-window-controls =
+    .label = Ocultar os controles da janela
+
 pane-zen-tabs-title = Gerenciamento de Guias
 category-zen-workspaces = 
     .tooltiptext = { pane-zen-tabs-title }

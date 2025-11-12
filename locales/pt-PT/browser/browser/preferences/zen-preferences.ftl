@@ -38,6 +38,10 @@ zen-look-and-feel-compact-view-top-toolbar =
     .label = Ocultar a barra de ferramentas superior também no modo compacto
 zen-look-and-feel-compact-toolbar-flash-popup = 
     .label = Fazer a barra de ferramentas saltar ligeiramente ao mudar ou ao abrir novos separadores no modo compacto
+
+zen-look-and-feel-hide-window-controls =
+    .label = Ocultar os controlos da janela
+
 pane-zen-tabs-title = Gestão de Separadores
 category-zen-workspaces = 
     .tooltiptext = { pane-zen-tabs-title }

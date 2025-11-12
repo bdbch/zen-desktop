@@ -38,6 +38,10 @@ zen-look-and-feel-compact-view-top-toolbar =
     .label = Sembunyikan juga toolbar atas dalam mode ringkas
 zen-look-and-feel-compact-toolbar-flash-popup = 
     .label = Buat bilah tab muncul sebentar saat beralih atau membuka tab baru dalam mode ringkas
+
+zen-look-and-feel-hide-window-controls =
+    .label = Sembunyikan kontrol jendela
+
 pane-zen-tabs-title = Pengelolaan Tab
 category-zen-workspaces = 
     .tooltiptext = { pane-zen-tabs-title }

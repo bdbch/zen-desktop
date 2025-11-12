@@ -38,6 +38,10 @@ zen-look-and-feel-compact-view-top-toolbar =
     .label = Ẩn thanh công cụ trên cùng trong chế độ thu gọn
 zen-look-and-feel-compact-toolbar-flash-popup = 
     .label = Thanh bên hiện lên khi chuyển thẻ hoặc mở thẻ mới trong chế độ thu gọn
+
+zen-look-and-feel-hide-window-controls =
+    .label = Ẩn điều khiển cửa sổ
+
 pane-zen-tabs-title = Quản lí thẻ
 category-zen-workspaces = 
     .tooltiptext = { pane-zen-tabs-title }

@@ -38,6 +38,10 @@ zen-look-and-feel-compact-view-top-toolbar =
     .label = Nascondi anche la barra degli strumenti superiore in modalità compatta
 zen-look-and-feel-compact-toolbar-flash-popup = 
     .label = Fai comparire brevemente la barra degli strumenti quando si cambiano o si aprono nuove schede in modalità compatta
+
+zen-look-and-feel-hide-window-controls =
+    .label = Nascondi i controlli della finestra
+
 pane-zen-tabs-title = Gestione Schede
 category-zen-workspaces = 
     .tooltiptext = { pane-zen-tabs-title }
