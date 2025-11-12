@@ -431,7 +431,7 @@ ZenPinnedTabsTracker.prototype.finalize = async function () {
 
 // Define ZenPinnedTabsEngine
 function ZenPinnedTabsEngine(service) {
-  SyncEngine.call(this, 'PinnedTabs', service);
+  SyncEngine.call(this, 'pinnedtabs', service);
 }
 
 ZenPinnedTabsEngine.prototype = Object.create(SyncEngine.prototype);
