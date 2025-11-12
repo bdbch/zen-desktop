@@ -38,6 +38,10 @@ zen-look-and-feel-compact-view-top-toolbar =
     .label = Masquer aussi la barre d’outils du haut en mode compact
 zen-look-and-feel-compact-toolbar-flash-popup = 
     .label = En mode compact, faire brièvement apparaitre la barre d’outils au changement ou à l’ouverture de nouveaux onglets
+
+zen-look-and-feel-hide-window-controls =
+    .label = Masquer les commandes de la fenêtre
+
 pane-zen-tabs-title = Gestion des onglets
 category-zen-workspaces = 
     .tooltiptext = { pane-zen-tabs-title }

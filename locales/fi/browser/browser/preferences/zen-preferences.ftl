@@ -38,6 +38,10 @@ zen-look-and-feel-compact-view-top-toolbar =
     .label = Piilota työkalupalkki niin myös kompaktissa tilassa
 zen-look-and-feel-compact-toolbar-flash-popup = 
     .label = Tee työkalurivin ponnahdusikkuna lyhyesti, kun vaihdat tai avaat uusia välilehtiä kompaktitilassa
+
+zen-look-and-feel-hide-window-controls =
+    .label = Piilota ikkunan ohjaimet
+
 pane-zen-tabs-title = Välilehtien Hallinta
 category-zen-workspaces = 
     .tooltiptext = { pane-zen-tabs-title }

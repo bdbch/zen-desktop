@@ -38,6 +38,10 @@ zen-look-and-feel-compact-view-top-toolbar =
     .label = 在紧凑模式下隐藏顶部工具栏
 zen-look-and-feel-compact-toolbar-flash-popup = 
     .label = 简洁模式下，切换或打开新标签页时短暂弹出工具栏
+
+zen-look-and-feel-hide-window-controls =
+    .label = 隐藏窗口控件
+
 pane-zen-tabs-title = 标签页管理
 category-zen-workspaces = 
     .tooltiptext = { pane-zen-tabs-title }

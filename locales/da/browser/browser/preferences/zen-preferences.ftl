@@ -38,6 +38,10 @@ zen-look-and-feel-compact-view-top-toolbar =
     .label = Skjul også den øverste værktøjslinje i kompakt tilstand
 zen-look-and-feel-compact-toolbar-flash-popup = 
     .label = Vis kortvarigt værktøjslinjen ved skift eller åbning af nye faner i kompakt tilstand
+
+zen-look-and-feel-hide-window-controls =
+    .label = Skjul vindueskontrollerne
+
 pane-zen-tabs-title = Fanehåndtering
 category-zen-workspaces = 
     .tooltiptext = { pane-zen-tabs-title }

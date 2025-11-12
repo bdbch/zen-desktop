@@ -38,6 +38,10 @@ zen-look-and-feel-compact-view-top-toolbar =
     .label = 上部のツールバーをコンパクトモードで非表示にする
 zen-look-and-feel-compact-toolbar-flash-popup = 
     .label = コンパクトモードで新しいタブを切り替えたり開いたりするときに、簡単にツールバーをポップアップさせる
+
+zen-look-and-feel-hide-window-controls =
+    .label = ウィンドウコントロールを非表示にする
+
 pane-zen-tabs-title = タブ管理
 category-zen-workspaces = 
     .tooltiptext = { pane-zen-tabs-title }

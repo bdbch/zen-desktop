@@ -38,6 +38,10 @@ zen-look-and-feel-compact-view-top-toolbar =
     .label = Dölj det övre verktygsfältet samt i kompakt läge
 zen-look-and-feel-compact-toolbar-flash-popup = 
     .label = Gör kort popup i verktygsfältet när du växlar eller öppnar nya flikar i kompakt läge
+
+zen-look-and-feel-hide-window-controls =
+    .label = Dölj fönsterkontrollerna
+
 pane-zen-tabs-title = Flikhantering
 category-zen-workspaces = 
     .tooltiptext = { pane-zen-tabs-title }

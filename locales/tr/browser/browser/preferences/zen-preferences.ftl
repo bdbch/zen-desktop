@@ -38,6 +38,10 @@ zen-look-and-feel-compact-view-top-toolbar =
     .label = Kompakt modda üst araç çubuğunu gizle
 zen-look-and-feel-compact-toolbar-flash-popup = 
     .label = Kompakt modda yeni sekmeler arasında geçiş yaparken veya yeni sekmeler açarken araç çubuğunun açılır penceresini aktif edin
+
+zen-look-and-feel-hide-window-controls =
+    .label = Pencere denetimlerini gizle
+
 pane-zen-tabs-title = Sekme Yönetimi
 category-zen-workspaces = 
     .tooltiptext = { pane-zen-tabs-title }

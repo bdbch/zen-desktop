@@ -38,6 +38,10 @@ zen-look-and-feel-compact-view-top-toolbar =
     .label = Skrýt horní panel nástrojů i v kompaktním režimu
 zen-look-and-feel-compact-toolbar-flash-popup = 
     .label = Stručně vytvořit vyskakovací okno panelu nástrojů při přepínání nebo otevírání nových panelů v kompaktním režimu
+
+zen-look-and-feel-hide-window-controls =
+    .label = Skrýt ovládací prvky okna
+
 pane-zen-tabs-title = Správa karet
 category-zen-workspaces = 
     .tooltiptext = { pane-zen-tabs-title }

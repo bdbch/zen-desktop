@@ -38,6 +38,10 @@ zen-look-and-feel-compact-view-top-toolbar =
     .label = إخفاء شريط الأدوات العلوي أيضا في الوضع المدمج
 zen-look-and-feel-compact-toolbar-flash-popup = 
     .label = اجعل شريط الأدوات منبثقا عند التبديل أو فتح علامات تبويب جديدة في الوضع المدمج
+
+zen-look-and-feel-hide-window-controls =
+    .label = إخفاء عناصر تحكم النافذة
+
 pane-zen-tabs-title = إدارة علامة التبويب
 category-zen-workspaces = 
     .tooltiptext = { pane-zen-tabs-title }

@@ -38,6 +38,10 @@ zen-look-and-feel-compact-view-top-toolbar =
     .label = پنهان‌کردن نوار ابزار بالا در حالت فشرده
 zen-look-and-feel-compact-toolbar-flash-popup = 
     .label = Briefly make the toolbar popup when switching or opening new tabs in compact mode
+
+zen-look-and-feel-hide-window-controls =
+    .label = پنهان کردن کنترل‌های پنجره
+
 pane-zen-tabs-title = Tab Management
 category-zen-workspaces = 
     .tooltiptext = { pane-zen-tabs-title }

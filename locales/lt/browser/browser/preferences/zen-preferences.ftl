@@ -38,6 +38,10 @@ zen-look-and-feel-compact-view-top-toolbar =
     .label = Slėpti viršutinę įrankių juostą ir kompaktiniu režimu
 zen-look-and-feel-compact-toolbar-flash-popup = 
     .label = Trumpai padaryti, kad įrankių juosta iškiltų perjungiant arba atidarant naujas korteles kompaktiniu režimu
+
+zen-look-and-feel-hide-window-controls =
+    .label = Slėpti lango valdiklius
+
 pane-zen-tabs-title = Kortelių tvarkymas
 category-zen-workspaces = 
     .tooltiptext = { pane-zen-tabs-title }
