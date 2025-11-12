@@ -38,6 +38,7 @@
       if (this.#hasInitializedLayout) return;
       this.#hasInitializedLayout = true;
       try {
+        nsZenMultiWindowFeature.registerWindow(window);
         const kNavbarItems = ['nav-bar', 'PersonalToolbar'];
         const kNewContainerId = 'zen-appcontent-navbar-container';
         let newContainer = document.getElementById(kNewContainerId);
