@@ -21,6 +21,12 @@ sync-engine-workspaces =
     .tooltiptext = Sync your workspaces across devices
     .accesskey = W
 
+sync-currently-syncing-pinnedtabs = Pinned Tabs & Folders
+sync-engine-pinnedtabs =
+    .label = Pinned Tabs & Folders
+    .tooltiptext = Sync your pinned tabs and tab folders across devices
+    .accesskey = P
+
 zen-glance-title = Glance
 zen-glance-header = General settings for glance
 zen-glance-description = Get a quick overview of your links without opening them in a new tab

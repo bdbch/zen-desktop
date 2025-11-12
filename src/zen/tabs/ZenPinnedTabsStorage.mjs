@@ -2,14 +2,19 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at http://mozilla.org/MPL/2.0/.
 var ZenPinnedTabsStorage = {
+  lazy: {},
   _saveCache: [],
 
   async init() {
+    ChromeUtils.defineESModuleGetters(this.lazy, {
+      PlacesUtils: 'resource://gre/modules/PlacesUtils.sys.mjs',
+      Weave: 'resource://services-sync/main.sys.mjs',
+    });
     await this._ensureTable();
   },
 
   async _ensureTable() {
-    await PlacesUtils.withConnectionWrapper('ZenPinnedTabsStorage._ensureTable', async (db) => {
+    await this.lazy.PlacesUtils.withConnectionWrapper('ZenPinnedTabsStorage._ensureTable', async (db) => {
       // Create the pins table if it doesn't exist
       await db.execute(`
         CREATE TABLE IF NOT EXISTS zen_pins (
@@ -57,6 +62,10 @@ var ZenPinnedTabsStorage = {
         CREATE INDEX IF NOT EXISTS idx_zen_pins_changes_uuid ON zen_pins_changes(uuid)
       `);
 
+      if (!this.lazy.Weave.Service.engineManager.get('pinnedtabs')) {
+        this.lazy.Weave.Service.engineManager.register(ZenPinnedTabsEngine);
+      }
+
       this._resolveInitialized();
     });
   },
@@ -94,7 +103,7 @@ var ZenPinnedTabsStorage = {
 
     const changedUUIDs = new Set();
 
-    await PlacesUtils.withConnectionWrapper('ZenPinnedTabsStorage.savePin', async (db) => {
+    await this.lazy.PlacesUtils.withConnectionWrapper('ZenPinnedTabsStorage.savePin', async (db) => {
       await db.executeTransaction(async () => {
         const now = Date.now();
 
@@ -168,7 +177,7 @@ var ZenPinnedTabsStorage = {
   },
 
   async getPins() {
-    const db = await PlacesUtils.promiseDBConnection();
+    const db = await this.lazy.PlacesUtils.promiseDBConnection();
     const rows = await db.executeCached(`
       SELECT * FROM zen_pins
       ORDER BY position ASC
@@ -244,7 +253,7 @@ var ZenPinnedTabsStorage = {
 
     const changedUUIDs = new Set();
 
-    await PlacesUtils.withConnectionWrapper('ZenPinnedTabsStorage.addTabToGroup', async (db) => {
+    await this.lazy.PlacesUtils.withConnectionWrapper('ZenPinnedTabsStorage.addTabToGroup', async (db) => {
       await db.executeTransaction(async () => {
         // Verify the group exists and is actually a group
         const groupCheck = await db.execute(
@@ -334,7 +343,7 @@ var ZenPinnedTabsStorage = {
 
     const changedUUIDs = new Set();
 
-    await PlacesUtils.withConnectionWrapper(
+    await this.lazy.PlacesUtils.withConnectionWrapper(
       'ZenPinnedTabsStorage.removeTabFromGroup',
       async (db) => {
         await db.executeTransaction(async () => {
@@ -414,7 +423,7 @@ var ZenPinnedTabsStorage = {
 
     const changedUUIDs = [uuid];
 
-    await PlacesUtils.withConnectionWrapper('ZenPinnedTabsStorage.removePin', async (db) => {
+    await this.lazy.PlacesUtils.withConnectionWrapper('ZenPinnedTabsStorage.removePin', async (db) => {
       await db.executeTransaction(async () => {
         // Get all child UUIDs first for change tracking
         const children = await db.execute(
@@ -457,7 +466,7 @@ var ZenPinnedTabsStorage = {
   },
 
   async wipeAllPins() {
-    await PlacesUtils.withConnectionWrapper('ZenPinnedTabsStorage.wipeAllPins', async (db) => {
+    await this.lazy.PlacesUtils.withConnectionWrapper('ZenPinnedTabsStorage.wipeAllPins', async (db) => {
       await db.execute(`DELETE FROM zen_pins`);
       await db.execute(`DELETE FROM zen_pins_changes`);
       await this.updateLastChangeTimestamp(db);
@@ -465,7 +474,7 @@ var ZenPinnedTabsStorage = {
   },
 
   async markChanged(uuid) {
-    await PlacesUtils.withConnectionWrapper('ZenPinnedTabsStorage.markChanged', async (db) => {
+    await this.lazy.PlacesUtils.withConnectionWrapper('ZenPinnedTabsStorage.markChanged', async (db) => {
       const now = Date.now();
       await db.execute(
         `
@@ -481,7 +490,7 @@ var ZenPinnedTabsStorage = {
   },
 
   async getChangedIDs() {
-    const db = await PlacesUtils.promiseDBConnection();
+    const db = await this.lazy.PlacesUtils.promiseDBConnection();
     const rows = await db.execute(`
       SELECT uuid, timestamp FROM zen_pins_changes
     `);
@@ -493,7 +502,7 @@ var ZenPinnedTabsStorage = {
   },
 
   async clearChangedIDs() {
-    await PlacesUtils.withConnectionWrapper('ZenPinnedTabsStorage.clearChangedIDs', async (db) => {
+    await this.lazy.PlacesUtils.withConnectionWrapper('ZenPinnedTabsStorage.clearChangedIDs', async (db) => {
       await db.execute(`DELETE FROM zen_pins_changes`);
     });
   },
@@ -538,7 +547,7 @@ var ZenPinnedTabsStorage = {
   },
 
   async getLastChangeTimestamp() {
-    const db = await PlacesUtils.promiseDBConnection();
+    const db = await this.lazy.PlacesUtils.promiseDBConnection();
     const result = await db.executeCached(`
       SELECT value FROM moz_meta WHERE key = 'zen_pins_last_change'
     `);
@@ -548,7 +557,7 @@ var ZenPinnedTabsStorage = {
   async updatePinPositions(pins) {
     const changedUUIDs = new Set();
 
-    await PlacesUtils.withConnectionWrapper(
+    await this.lazy.PlacesUtils.withConnectionWrapper(
       'ZenPinnedTabsStorage.updatePinPositions',
       async (db) => {
         await db.executeTransaction(async () => {
@@ -597,7 +606,7 @@ var ZenPinnedTabsStorage = {
 
     const changedUUIDs = new Set();
 
-    await PlacesUtils.withConnectionWrapper('ZenPinnedTabsStorage.updatePinTitle', async (db) => {
+    await this.lazy.PlacesUtils.withConnectionWrapper('ZenPinnedTabsStorage.updatePinTitle', async (db) => {
       await db.executeTransaction(async () => {
         const now = Date.now();
 
@@ -645,7 +654,7 @@ var ZenPinnedTabsStorage = {
   },
 
   async __dropTables() {
-    await PlacesUtils.withConnectionWrapper('ZenPinnedTabsStorage.__dropTables', async (db) => {
+    await this.lazy.PlacesUtils.withConnectionWrapper('ZenPinnedTabsStorage.__dropTables', async (db) => {
       await db.execute(`DROP TABLE IF EXISTS zen_pins`);
       await db.execute(`DROP TABLE IF EXISTS zen_pins_changes`);
     });
