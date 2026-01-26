@@ -134,6 +134,8 @@ class nsZenPinnedTabManager extends nsZenDOMOperatedFeature {
       case "TabPinned":
         tab._zenClickEventListener = this._zenClickEventListener;
         tab.addEventListener("click", tab._zenClickEventListener);
+        // Notify sync engine of pinned tab changes
+        Services.obs.notifyObservers(null, "zen-pinned-tabs-changed");
         break;
       // [Fall through]
       case "TabUnpinned":
@@ -142,6 +144,11 @@ class nsZenPinnedTabManager extends nsZenDOMOperatedFeature {
           delete tab._zenClickEventListener;
         }
         this.resetPinChangedUrl(tab);
+        // Only notify sync engine if tab is being unpinned, not closed
+        // When a tab is closing, it will be removed anyway, no need to sync
+        if (!tab.closing) {
+          Services.obs.notifyObservers(null, "zen-pinned-tabs-changed");
+        }
         break;
       default:
         console.warn("ZenPinnedTabManager: Unhandled tab event", action);
@@ -426,6 +433,8 @@ class nsZenPinnedTabManager extends nsZenDOMOperatedFeature {
       tab.dispatchEvent(event);
     }
     gZenUIManager.updateTabsToolbar();
+    // Notify sync engine of pinned/essential tab changes
+    Services.obs.notifyObservers(null, "zen-pinned-tabs-changed");
     return movedAll;
   }
 
@@ -460,6 +469,8 @@ class nsZenPinnedTabManager extends nsZenDOMOperatedFeature {
       tab.dispatchEvent(event);
     }
     gZenUIManager.updateTabsToolbar();
+    // Notify sync engine of pinned/essential tab changes
+    Services.obs.notifyObservers(null, "zen-pinned-tabs-changed");
   }
 
   _insertItemsIntoTabContextMenu() {
@@ -906,6 +917,10 @@ class nsZenPinnedTabManager extends nsZenDOMOperatedFeature {
 
   onTabLabelChanged(tab) {
     tab.dispatchEvent(new CustomEvent("ZenTabLabelChanged", { bubbles: true, detail: { tab } }));
+    // Notify sync engine if this is a pinned/essential tab
+    if (tab.pinned || tab.hasAttribute("zen-essential")) {
+      Services.obs.notifyObservers(null, "zen-pinned-tabs-changed");
+    }
   }
 }
 
