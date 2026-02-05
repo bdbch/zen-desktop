@@ -67,7 +67,14 @@ add_task(async function test_legacy_knownRemoteIds_never_authorize_deletions() {
   await storeProto.applyRemoteData.call(store, {
     workspaces: [{ id: "ws-remote", name: "Remote Workspace", position: 0 }],
     folders: [{ id: "folder-remote", name: "Remote Folder", position: 0 }],
-    tabs: [{ id: "tab-remote", url: "https://example.com/", position: 0 }],
+    tabs: [
+      {
+        id: "tab-remote",
+        url: "https://example.com/",
+        workspaceId: "ws-remote",
+        position: 0,
+      },
+    ],
   });
 
   Assert.ok(observedPolicies.workspaces, "Workspace policy should be computed");
