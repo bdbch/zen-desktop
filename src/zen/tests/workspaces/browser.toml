@@ -19,4 +19,5 @@ support-files = [
 
 ["browser_private_mode.js"]
 ["browser_private_mode_startup.js"]
+["browser_sidebarsync_payload_validation.js"]
 ["browser_sidebarsync_knownRemoteIds_legacy_no_delete.js"]

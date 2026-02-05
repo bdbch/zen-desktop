@@ -22,11 +22,14 @@ const PREF_TESTONLY = "zen.sidebarsync.testonly";
 
 const COLLECT_READY_TIMEOUT_MS = 2000;
 const APPLY_READY_TIMEOUT_MS = 5000;
+const CURRENT_SCHEMA_VERSION = 2;
 const KNOWN_REMOTE_IDS_VERSION = 1;
 const KNOWN_REMOTE_SOURCE_REMOTE = "remote";
 const KNOWN_REMOTE_SOURCE_LEGACY = "legacy";
 const MIN_KNOWN_FOR_SHRINK_GUARD = 4;
 const SHRINK_RATIO = 0.25;
+const INVALID_CUTOFF_MIN_COUNT = 3;
+const INVALID_CUTOFF_RATIO = 0.2;
 
 // Module-level flag to prevent tracker from marking changes during apply
 // This is needed because this.engine._tracker may not be accessible from Store
@@ -378,49 +381,182 @@ SidebarSyncStore.prototype = {
     });
   },
 
-  _getValidRemoteWorkspaces(remoteWorkspaces = []) {
-    if (!Array.isArray(remoteWorkspaces)) {
-      logger.warn("Skipping invalid workspaces payload: expected array");
-      return [];
+  _isNonEmptyString(value) {
+    return typeof value === "string" && value.length > 0;
+  },
+
+  _normalizeNullableString(value) {
+    return typeof value === "string" ? value : null;
+  },
+
+  _normalizeFiniteNumber(value, fallback = 0) {
+    return Number.isFinite(value) ? value : fallback;
+  },
+
+  _normalizeBoolean(value, fallback = false) {
+    return typeof value === "boolean" ? value : fallback;
+  },
+
+  _normalizeRemoteWorkspaceEntry(workspace) {
+    if (!workspace || typeof workspace !== "object") {
+      return null;
     }
 
-    return remoteWorkspaces.filter((ws) => {
-      if (!ws?.id || !ws?.name) {
-        logger.warn(`Skipping invalid workspace: missing id or name`);
-        return false;
+    if (
+      !this._isNonEmptyString(workspace.id) ||
+      !this._isNonEmptyString(workspace.name) ||
+      !Number.isFinite(workspace.position)
+    ) {
+      return null;
+    }
+
+    return {
+      id: workspace.id,
+      name: workspace.name,
+      position: workspace.position,
+      containerTabId: this._normalizeFiniteNumber(workspace.containerTabId, 0),
+      icon: this._normalizeNullableString(workspace.icon),
+      theme: this._normalizeNullableString(workspace.theme),
+      isDefault: this._normalizeBoolean(workspace.isDefault, false),
+      lastModified: Number.isFinite(workspace.lastModified) ? workspace.lastModified : 0,
+    };
+  },
+
+  _normalizeRemoteFolderEntry(folder) {
+    if (!folder || typeof folder !== "object") {
+      return null;
+    }
+
+    if (!this._isNonEmptyString(folder.id)) {
+      return null;
+    }
+
+    return {
+      id: folder.id,
+      name: typeof folder.name === "string" ? folder.name : "",
+      position: this._normalizeFiniteNumber(folder.position, 0),
+      workspaceId: this._normalizeNullableString(folder.workspaceId),
+      parentId: this._normalizeNullableString(folder.parentId),
+      collapsed: this._normalizeBoolean(folder.collapsed, false),
+      icon: this._normalizeNullableString(folder.icon),
+      lastModified: Number.isFinite(folder.lastModified) ? folder.lastModified : 0,
+    };
+  },
+
+  _normalizeRemoteTabEntry(tab, schemaVersion = 1) {
+    if (!tab || typeof tab !== "object") {
+      return null;
+    }
+
+    if (!this._isNonEmptyString(tab.id) || !this._isNonEmptyString(tab.url)) {
+      return null;
+    }
+
+    if (tab.url.startsWith("about:")) {
+      return null;
+    }
+
+    const isEssential = this._normalizeBoolean(tab.isEssential, false);
+    let workspaceId = null;
+    if (!isEssential) {
+      if (!this._isNonEmptyString(tab.workspaceId)) {
+        return null;
       }
-      return true;
-    });
+      workspaceId = tab.workspaceId;
+    }
+
+    const normalized = {
+      id: tab.id,
+      url: tab.url,
+      position: this._normalizeFiniteNumber(tab.position, 0),
+      isEssential,
+      folderId: this._normalizeNullableString(tab.folderId),
+      label: this._normalizeNullableString(tab.label),
+      workspaceId,
+      isPinned: this._normalizeBoolean(tab.isPinned, true),
+      icon: this._normalizeNullableString(tab.icon),
+      lastModified: Number.isFinite(tab.lastModified) ? tab.lastModified : 0,
+      essentialContainerId: 0,
+    };
+
+    if (schemaVersion >= 2) {
+      normalized.essentialContainerId = this._normalizeFiniteNumber(tab.essentialContainerId, 0);
+    }
+
+    return normalized;
+  },
+
+  _validateAndNormalizeRemoteType(type, entries, schemaVersion = 1) {
+    const normalizedEntries = Array.isArray(entries) ? entries : [];
+    const totalCount = normalizedEntries.length;
+    const seenIds = new Set();
+    const valid = [];
+    let invalidCount = 0;
+    let duplicateCount = 0;
+
+    for (const entry of normalizedEntries) {
+      let normalized = null;
+      if (type === "workspaces") {
+        normalized = this._normalizeRemoteWorkspaceEntry(entry);
+      } else if (type === "folders") {
+        normalized = this._normalizeRemoteFolderEntry(entry);
+      } else {
+        normalized = this._normalizeRemoteTabEntry(entry, schemaVersion);
+      }
+
+      if (!normalized) {
+        invalidCount++;
+        continue;
+      }
+
+      if (seenIds.has(normalized.id)) {
+        duplicateCount++;
+        continue;
+      }
+
+      seenIds.add(normalized.id);
+      valid.push(normalized);
+    }
+
+    if (duplicateCount > 0) {
+      logDeletionGuard(`${type}: dropped duplicate IDs=${duplicateCount}`);
+    }
+
+    if (invalidCount > 0) {
+      logDeletionGuard(`${type}: dropped invalid entries=${invalidCount}/${totalCount}`);
+    }
+
+    const invalidRate = totalCount > 0 ? invalidCount / totalCount : 0;
+    const skippedByInvalidCutoff =
+      invalidCount >= INVALID_CUTOFF_MIN_COUNT && invalidRate > INVALID_CUTOFF_RATIO;
+
+    if (skippedByInvalidCutoff) {
+      logDeletionGuard(
+        `${type}: invalid payload cutoff hit (invalid=${invalidCount}, total=${totalCount}, ratio=${invalidRate.toFixed(
+          3
+        )})`
+      );
+    }
+
+    return {
+      valid: skippedByInvalidCutoff ? [] : valid,
+      invalidCount,
+      duplicateCount,
+      totalCount,
+      skippedByInvalidCutoff,
+    };
+  },
+
+  _getValidRemoteWorkspaces(remoteWorkspaces = []) {
+    return this._validateAndNormalizeRemoteType("workspaces", remoteWorkspaces, 1).valid;
   },
 
   _getValidRemoteFolders(remoteFolders = []) {
-    if (!Array.isArray(remoteFolders)) {
-      logger.warn("Skipping invalid folders payload: expected array");
-      return [];
-    }
-
-    return remoteFolders.filter((folder) => {
-      if (!folder?.id) {
-        logger.warn("Skipping invalid folder: missing id");
-        return false;
-      }
-      return true;
-    });
+    return this._validateAndNormalizeRemoteType("folders", remoteFolders, 1).valid;
   },
 
   _getValidRemoteTabs(remoteTabs = []) {
-    if (!Array.isArray(remoteTabs)) {
-      logger.warn("Skipping invalid tabs payload: expected array");
-      return [];
-    }
-
-    return remoteTabs.filter((tab) => {
-      if (!tab?.id || !tab?.url) {
-        logger.warn(`Skipping invalid tab: missing id or url`);
-        return false;
-      }
-      return true;
-    });
+    return this._validateAndNormalizeRemoteType("tabs", remoteTabs, CURRENT_SCHEMA_VERSION).valid;
   },
 
   _getLocalWorkspaceCount() {
@@ -530,7 +666,7 @@ SidebarSyncStore.prototype = {
     const now = Date.now();
 
     const data = {
-      schemaVersion: 1,
+      schemaVersion: CURRENT_SCHEMA_VERSION,
       lastModified: now,
       workspaces: this.syncWorkspaces(win, now),
       folders: this.syncFolders(win, now),
@@ -551,10 +687,25 @@ SidebarSyncStore.prototype = {
   async applyRemoteData(remoteData) {
     logger.info("applyRemoteData called");
 
-    if (!remoteData) {
-      logger.warn("No remote data to apply");
+    if (!remoteData || typeof remoteData !== "object" || Array.isArray(remoteData)) {
+      logger.warn("Skipping apply: invalid root payload (expected object)");
       return;
     }
+
+    const schemaVersion = Number.isFinite(remoteData.schemaVersion) ? remoteData.schemaVersion : 1;
+    if (schemaVersion > CURRENT_SCHEMA_VERSION) {
+      logDeletionGuard(
+        `SCHEMA_UNSUPPORTED: schemaVersion=${schemaVersion} > current=${CURRENT_SCHEMA_VERSION}`
+      );
+      logger.warn(`Skipping apply: unsupported schemaVersion=${schemaVersion}`);
+      return;
+    }
+
+    const normalizedRemoteData = {
+      workspaces: Array.isArray(remoteData.workspaces) ? remoteData.workspaces : [],
+      folders: Array.isArray(remoteData.folders) ? remoteData.folders : [],
+      tabs: Array.isArray(remoteData.tabs) ? remoteData.tabs : [],
+    };
 
     const win = await getEligibleSyncWindow({ timeoutMs: APPLY_READY_TIMEOUT_MS });
     if (!win) {
@@ -565,10 +716,26 @@ SidebarSyncStore.prototype = {
     // Get last successfully applied remote snapshot.
     const knownRemoteIds = this._getKnownRemoteIds();
 
+    const workspaceValidation = this._validateAndNormalizeRemoteType(
+      "workspaces",
+      normalizedRemoteData.workspaces,
+      schemaVersion
+    );
+    const folderValidation = this._validateAndNormalizeRemoteType(
+      "folders",
+      normalizedRemoteData.folders,
+      schemaVersion
+    );
+    const tabValidation = this._validateAndNormalizeRemoteType(
+      "tabs",
+      normalizedRemoteData.tabs,
+      schemaVersion
+    );
+
     const validRemoteData = {
-      workspaces: this._getValidRemoteWorkspaces(remoteData.workspaces || []),
-      folders: this._getValidRemoteFolders(remoteData.folders || []),
-      tabs: this._getValidRemoteTabs(remoteData.tabs || []),
+      workspaces: workspaceValidation.valid,
+      folders: folderValidation.valid,
+      tabs: tabValidation.valid,
     };
 
     const localCounts = {
@@ -598,6 +765,37 @@ SidebarSyncStore.prototype = {
       ),
     };
 
+    if (workspaceValidation.skippedByInvalidCutoff) {
+      logDeletionGuard("workspaces: skipping apply due to invalid-rate cutoff");
+      applyPolicies.workspaces = {
+        ...applyPolicies.workspaces,
+        allowDeletion: false,
+        updateKnown: false,
+        skipApply: true,
+        invalidPayload: true,
+      };
+    }
+    if (folderValidation.skippedByInvalidCutoff) {
+      logDeletionGuard("folders: skipping apply due to invalid-rate cutoff");
+      applyPolicies.folders = {
+        ...applyPolicies.folders,
+        allowDeletion: false,
+        updateKnown: false,
+        skipApply: true,
+        invalidPayload: true,
+      };
+    }
+    if (tabValidation.skippedByInvalidCutoff) {
+      logDeletionGuard("tabs: skipping apply due to invalid-rate cutoff");
+      applyPolicies.tabs = {
+        ...applyPolicies.tabs,
+        allowDeletion: false,
+        updateKnown: false,
+        skipApply: true,
+        invalidPayload: true,
+      };
+    }
+
     logger.info(
       `Download: ${validRemoteData.workspaces.length} workspaces, ` +
         `${validRemoteData.folders.length} folders, ${validRemoteData.tabs.length} tabs`
@@ -615,39 +813,63 @@ SidebarSyncStore.prototype = {
     try {
       // Apply in order: workspaces first, then folders, then tabs
       // applyFolders returns a map of folder elements so applyTabs can use it
-      const workspacesApplied =
-        (await this.applyWorkspaces(validRemoteData.workspaces, win, applyPolicies.workspaces)) !==
-        false;
+      let workspacesApplied = true;
+      if (applyPolicies.workspaces.skipApply) {
+        workspacesApplied = false;
+      } else {
+        workspacesApplied =
+          (await this.applyWorkspaces(
+            validRemoteData.workspaces,
+            win,
+            applyPolicies.workspaces
+          )) !== false;
+      }
 
       let folderMap = new Map();
       let foldersApplied = true;
-      const folderResult = await this.applyFolders(
-        validRemoteData.folders,
-        win,
-        applyPolicies.folders
-      );
-      if (folderResult instanceof Map) {
-        folderMap = folderResult;
-      } else if (folderResult === false) {
+      if (applyPolicies.folders.skipApply) {
         foldersApplied = false;
-      } else if (folderResult && typeof folderResult === "object") {
-        if (folderResult.folderMap instanceof Map) {
-          folderMap = folderResult.folderMap;
+      } else {
+        const folderResult = await this.applyFolders(
+          validRemoteData.folders,
+          win,
+          applyPolicies.folders
+        );
+        if (folderResult instanceof Map) {
+          folderMap = folderResult;
+        } else if (folderResult === false) {
+          foldersApplied = false;
+        } else if (folderResult && typeof folderResult === "object") {
+          if (folderResult.folderMap instanceof Map) {
+            folderMap = folderResult.folderMap;
+          }
+          foldersApplied = folderResult.success !== false;
         }
-        foldersApplied = folderResult.success !== false;
       }
 
-      const tabsApplied =
-        (await this.applyTabs(validRemoteData.tabs, win, applyPolicies.tabs, folderMap)) !== false;
+      let tabsApplied = true;
+      if (applyPolicies.tabs.skipApply) {
+        tabsApplied = false;
+      } else {
+        tabsApplied =
+          (await this.applyTabs(validRemoteData.tabs, win, applyPolicies.tabs, folderMap)) !==
+          false;
+      }
 
-      this._updateKnownRemoteIds(validRemoteData, {
-        previousKnown: knownRemoteIds,
-        updateTypes: {
-          workspaces: applyPolicies.workspaces.updateKnown && workspacesApplied,
-          folders: applyPolicies.folders.updateKnown && foldersApplied,
-          tabs: applyPolicies.tabs.updateKnown && tabsApplied,
-        },
-      });
+      const updateTypes = {
+        workspaces: applyPolicies.workspaces.updateKnown && workspacesApplied,
+        folders: applyPolicies.folders.updateKnown && foldersApplied,
+        tabs: applyPolicies.tabs.updateKnown && tabsApplied,
+      };
+
+      if (updateTypes.workspaces || updateTypes.folders || updateTypes.tabs) {
+        this._updateKnownRemoteIds(validRemoteData, {
+          previousKnown: knownRemoteIds,
+          updateTypes,
+        });
+      } else {
+        logDeletionGuard("knownRemoteIds: skipping update (no types eligible)");
+      }
     } catch (e) {
       logger.error(`Failed to apply remote data: ${e.message}`);
       console.error(e);
@@ -905,7 +1127,7 @@ SidebarSyncStore.prototype = {
       }
 
       const localById = new Map(localWorkspaces.map((ws) => [ws.uuid, ws]));
-      const validRemote = this._getValidRemoteWorkspaces(remoteWorkspaces);
+      const validRemote = Array.isArray(remoteWorkspaces) ? remoteWorkspaces : [];
       const remoteById = new Map(validRemote.map((ws) => [ws.id, ws]));
       const knownRemoteSet = new Set(this._normalizeKnownIdList(deletionPolicy.knownIds));
 
@@ -1072,8 +1294,7 @@ SidebarSyncStore.prototype = {
         }
       }
 
-      // Validate remote data
-      const validRemote = this._getValidRemoteFolders(remoteFolders);
+      const validRemote = Array.isArray(remoteFolders) ? remoteFolders : [];
       const remoteById = new Map(validRemote.map((f) => [f.id, f]));
       const knownRemoteSet = new Set(this._normalizeKnownIdList(deletionPolicy.knownIds));
 
@@ -1288,8 +1509,7 @@ SidebarSyncStore.prototype = {
         }
       }
 
-      // Validate remote data
-      const validRemote = this._getValidRemoteTabs(remoteTabs);
+      const validRemote = Array.isArray(remoteTabs) ? remoteTabs : [];
 
       const remoteById = new Map(validRemote.map((t) => [t.id, t]));
       const knownRemoteSet = new Set(this._normalizeKnownIdList(deletionPolicy.knownIds));
