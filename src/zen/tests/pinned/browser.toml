@@ -14,5 +14,6 @@ prefs = ["zen.workspaces.separate-essentials=false"]
 ["browser_pinned_changed.js"]
 ["browser_pinned_created.js"]
 ["browser_pinned_to_essential.js"]
+["browser_sidebarsync_suspicious_empty_skip_delete.js"]
 
 ["browser_issue_8726.js"]
