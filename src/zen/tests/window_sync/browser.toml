@@ -10,3 +10,4 @@ support-files = [
 
 ["browser_sync_tab_open.js"]
 ["browser_sync_tab_label.js"]
+["browser_sidebarsync_window_selection_gating.js"]
