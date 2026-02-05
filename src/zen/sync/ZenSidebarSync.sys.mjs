@@ -17,6 +17,11 @@ ChromeUtils.defineLazyGetter(lazy, "SIDEBAR_SYNC_GUID", () =>
 
 const LOG_PREFIX = "[ZenSidebarSync]";
 const PREF_KNOWN_REMOTE_IDS = "engine.sidebarsync.knownRemoteIds";
+const PREF_DEBUG_LOG = "zen.sidebarsync.debug";
+const PREF_TESTONLY = "zen.sidebarsync.testonly";
+
+const COLLECT_READY_TIMEOUT_MS = 2000;
+const APPLY_READY_TIMEOUT_MS = 5000;
 
 // Module-level flag to prevent tracker from marking changes during apply
 // This is needed because this.engine._tracker may not be accessible from Store
@@ -38,6 +43,128 @@ const logger = {
 
   error(msg) {
     console.error(this._format(msg));
+  },
+};
+
+function shouldLogGating() {
+  return Services.prefs.getBoolPref(PREF_DEBUG_LOG, false);
+}
+
+function logGating(msg) {
+  if (shouldLogGating()) {
+    logger.info(msg);
+  }
+}
+
+function isEligibleWindow(win) {
+  try {
+    return (
+      !!win &&
+      !win.closed &&
+      !!win.gBrowser &&
+      !!win.gZenWorkspaces &&
+      !win.gZenWorkspaces.privateWindowOrDisabled &&
+      !!win.gZenWorkspaces.workspaceEnabled
+    );
+  } catch {
+    return false;
+  }
+}
+
+async function waitForZenReady(win, timeoutMs) {
+  const workspaces = win?.gZenWorkspaces;
+  if (!workspaces?.promisePinnedInitialized || !workspaces?.promiseInitialized) {
+    logGating("waitForZenReady: missing readiness promises");
+    return false;
+  }
+
+  if (!win || win.closed) {
+    return false;
+  }
+
+  let timerId;
+  try {
+    return await new Promise((resolve) => {
+      let resolved = false;
+
+      const delayMs = Number.isFinite(timeoutMs) ? Math.max(0, timeoutMs) : 0;
+
+      const finish = (value) => {
+        if (resolved) {
+          return;
+        }
+        resolved = true;
+        if (timerId != null && win?.clearTimeout) {
+          try {
+            win.clearTimeout(timerId);
+          } catch {
+            // Best effort only.
+          }
+        }
+        resolve(value);
+      };
+
+      timerId = win.setTimeout(() => finish(false), delayMs);
+
+      Promise.all([workspaces.promisePinnedInitialized, workspaces.promiseInitialized]).then(
+        () => finish(true),
+        () => finish(false)
+      );
+    });
+  } catch {
+    return false;
+  }
+}
+
+async function getEligibleSyncWindow({ timeoutMs = 0 } = {}) {
+  const candidates = [];
+  for (const win of Services.wm.getEnumerator("navigator:browser")) {
+    if (isEligibleWindow(win)) {
+      candidates.push(win);
+    }
+  }
+
+  // Prefer windows that completed startup.
+  candidates.sort(
+    (a, b) => (b.gZenStartup?.isReady ? 1 : 0) - (a.gZenStartup?.isReady ? 1 : 0)
+  );
+
+  for (const win of candidates) {
+    if (await waitForZenReady(win, timeoutMs)) {
+      logGating("getEligibleSyncWindow: selected eligible ready window");
+      return win;
+    }
+    logGating("getEligibleSyncWindow: window not ready, skipping");
+  }
+
+  logGating("getEligibleSyncWindow: no eligible ready window available");
+  return null;
+}
+
+export const __testOnly = {
+  getEligibleSyncWindow(options) {
+    if (!Services.prefs.getBoolPref(PREF_TESTONLY, false)) {
+      throw new Error(
+        "ZenSidebarSync __testOnly is disabled. Set zen.sidebarsync.testonly=true to enable."
+      );
+    }
+    return getEligibleSyncWindow(options);
+  },
+  isEligibleWindow(win) {
+    if (!Services.prefs.getBoolPref(PREF_TESTONLY, false)) {
+      throw new Error(
+        "ZenSidebarSync __testOnly is disabled. Set zen.sidebarsync.testonly=true to enable."
+      );
+    }
+    return isEligibleWindow(win);
+  },
+  waitForZenReady(win, timeoutMs) {
+    if (!Services.prefs.getBoolPref(PREF_TESTONLY, false)) {
+      throw new Error(
+        "ZenSidebarSync __testOnly is disabled. Set zen.sidebarsync.testonly=true to enable."
+      );
+    }
+    return waitForZenReady(win, timeoutMs);
   },
 };
 
@@ -66,16 +193,19 @@ SidebarSyncEngine.prototype = {
   allowSkippedRecord: false,
 
   async getChangedIDs() {
-    let changedIDs = {};
-    if (this._tracker.modified) {
-      // Don't report changes if workspaces aren't enabled yet
-      const win = Services.wm.getMostRecentWindow("navigator:browser");
-      if (!win?.gZenWorkspaces?.workspaceEnabled) {
-        logger.info("Workspaces not enabled, deferring upload");
-        return changedIDs;
-      }
-      changedIDs[lazy.SIDEBAR_SYNC_GUID] = 0;
+    const changedIDs = {};
+    if (!this._tracker.modified) {
+      return changedIDs;
     }
+
+    // Defer upload until we have an eligible, fully initialized window.
+    const win = await getEligibleSyncWindow({ timeoutMs: COLLECT_READY_TIMEOUT_MS });
+    if (!win) {
+      logGating("getChangedIDs: deferring upload (no eligible ready window)");
+      return changedIDs;
+    }
+
+    changedIDs[lazy.SIDEBAR_SYNC_GUID] = 0;
     return changedIDs;
   },
 
@@ -109,14 +239,13 @@ SidebarSyncEngine.prototype = {
   },
 
   async _reconcile(item) {
-    // Check if workspaces are enabled before accepting
-    const win = Services.wm.getMostRecentWindow("navigator:browser");
-    if (!win?.gZenWorkspaces?.workspaceEnabled) {
-      // Reject record so Firefox Sync will retry on next sync
-      logger.info(`Reconcile: rejecting record ${item.id} (workspaces not enabled)`);
+    const win = await getEligibleSyncWindow({ timeoutMs: APPLY_READY_TIMEOUT_MS });
+    if (!win) {
+      // Reject record so Firefox Sync will retry on next sync.
+      logGating(`Reconcile: rejecting record ${item.id} (no eligible ready window)`);
       return false;
     }
-    logger.info(`Reconcile: accepting record ${item.id}`);
+    logGating(`Reconcile: accepting record ${item.id}`);
     return true;
   },
 
@@ -169,16 +298,10 @@ SidebarSyncStore.prototype = {
    * Collect all local sidebar data for syncing to the server.
    * This is called when uploading local changes.
    */
-  collectSyncData() {
-    const win = Services.wm.getMostRecentWindow("navigator:browser");
-    if (!win?.gBrowser || !win?.gZenWorkspaces) {
-      logger.warn("No browser window available");
-      return null;
-    }
-
-    // Don't upload until workspaces are enabled
-    if (!win.gZenWorkspaces.workspaceEnabled) {
-      logger.warn("Workspaces not enabled, skipping upload");
+  async collectSyncData() {
+    const win = await getEligibleSyncWindow({ timeoutMs: COLLECT_READY_TIMEOUT_MS });
+    if (!win) {
+      logGating("collectSyncData: skipping upload (no eligible ready window)");
       return null;
     }
 
@@ -214,19 +337,11 @@ SidebarSyncStore.prototype = {
       return;
     }
 
-    const win = Services.wm.getMostRecentWindow("navigator:browser");
-    if (!win?.gZenWorkspaces || win.closed) {
-      logger.warn("No valid browser window");
+    const win = await getEligibleSyncWindow({ timeoutMs: APPLY_READY_TIMEOUT_MS });
+    if (!win) {
+      logGating("applyRemoteData: skipping apply (no eligible ready window)");
       return;
     }
-
-    // Check if workspaces are enabled
-    if (!win.gZenWorkspaces.workspaceEnabled) {
-      logger.warn("Workspaces not enabled, skipping sync");
-      return;
-    }
-
-    logger.info("Workspaces enabled, proceeding with apply");
 
     // Get previously known remote IDs to distinguish "new locally" vs "deleted remotely"
     const knownRemoteIds = this._getKnownRemoteIds();
@@ -1152,7 +1267,7 @@ SidebarSyncStore.prototype = {
     let record = new SidebarSyncRec(collection, id);
 
     if (id === lazy.SIDEBAR_SYNC_GUID) {
-      const data = this.collectSyncData();
+      const data = await this.collectSyncData();
       if (data && data.workspaces.length) {
         record.value = data;
       } else {
