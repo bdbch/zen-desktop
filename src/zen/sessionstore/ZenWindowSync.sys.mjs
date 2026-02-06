@@ -1092,12 +1092,22 @@ class nsZenWindowSync {
     const tab = aEvent.target;
     const window = tab.ownerGlobal;
     const isUnsyncedWindow = window.gZenWorkspaces.privateWindowOrDisabled;
-    if (tab.id) {
+    const forcedSyncId =
+      typeof tab._zenForcedSyncId === "string" && tab._zenForcedSyncId
+        ? tab._zenForcedSyncId
+        : null;
+
+    if (forcedSyncId) {
+      tab.id = forcedSyncId;
+      delete tab._zenForcedSyncId;
+    } else if (tab.id) {
       // This tab was opened as part of a sync operation.
       return;
+    } else {
+      tab.id = this.#newTabSyncId;
     }
+
     tab._zenContentsVisible = true;
-    tab.id = this.#newTabSyncId;
     if (isUnsyncedWindow || !lazy.gWindowSyncEnabled) {
       return;
     }

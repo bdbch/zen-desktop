@@ -7,3 +7,4 @@ prefs = ["zen.workspaces.separate-essentials=true"]
 
 ["browser_container_auto_switch.js"]
 ["browser_container_specific_essentials.js"]
+["browser_sidebarsync_essential_container_apply.js"]

@@ -17,6 +17,19 @@ ChromeUtils.defineLazyGetter(lazy, "SIDEBAR_SYNC_GUID", () =>
 
 const LOG_PREFIX = "[ZenSidebarSync]";
 const PREF_KNOWN_REMOTE_IDS = "engine.sidebarsync.knownRemoteIds";
+const PREF_DEBUG_LOG = "zen.sidebarsync.debug";
+const PREF_TESTONLY = "zen.sidebarsync.testonly";
+
+const COLLECT_READY_TIMEOUT_MS = 2000;
+const APPLY_READY_TIMEOUT_MS = 5000;
+const CURRENT_SCHEMA_VERSION = 2;
+const KNOWN_REMOTE_IDS_VERSION = 1;
+const KNOWN_REMOTE_SOURCE_REMOTE = "remote";
+const KNOWN_REMOTE_SOURCE_LEGACY = "legacy";
+const MIN_KNOWN_FOR_SHRINK_GUARD = 4;
+const SHRINK_RATIO = 0.25;
+const INVALID_CUTOFF_MIN_COUNT = 3;
+const INVALID_CUTOFF_RATIO = 0.2;
 
 // Module-level flag to prevent tracker from marking changes during apply
 // This is needed because this.engine._tracker may not be accessible from Store
@@ -38,6 +51,132 @@ const logger = {
 
   error(msg) {
     console.error(this._format(msg));
+  },
+};
+
+function shouldLogGating() {
+  return Services.prefs.getBoolPref(PREF_DEBUG_LOG, false);
+}
+
+function logGating(msg) {
+  if (shouldLogGating()) {
+    logger.info(msg);
+  }
+}
+
+function logDeletionGuard(msg) {
+  if (shouldLogGating()) {
+    logger.info(msg);
+  }
+}
+
+function isEligibleWindow(win) {
+  try {
+    return (
+      !!win &&
+      !win.closed &&
+      !!win.gBrowser &&
+      !!win.gZenWorkspaces &&
+      !win.gZenWorkspaces.privateWindowOrDisabled &&
+      !!win.gZenWorkspaces.workspaceEnabled
+    );
+  } catch {
+    return false;
+  }
+}
+
+async function waitForZenReady(win, timeoutMs) {
+  const workspaces = win?.gZenWorkspaces;
+  if (!workspaces?.promisePinnedInitialized || !workspaces?.promiseInitialized) {
+    logGating("waitForZenReady: missing readiness promises");
+    return false;
+  }
+
+  if (!win || win.closed) {
+    return false;
+  }
+
+  let timerId;
+  try {
+    return await new Promise((resolve) => {
+      let resolved = false;
+
+      const delayMs = Number.isFinite(timeoutMs) ? Math.max(0, timeoutMs) : 0;
+
+      const finish = (value) => {
+        if (resolved) {
+          return;
+        }
+        resolved = true;
+        if (timerId != null && win?.clearTimeout) {
+          try {
+            win.clearTimeout(timerId);
+          } catch {
+            // Best effort only.
+          }
+        }
+        resolve(value);
+      };
+
+      timerId = win.setTimeout(() => finish(false), delayMs);
+
+      Promise.all([workspaces.promisePinnedInitialized, workspaces.promiseInitialized]).then(
+        () => finish(true),
+        () => finish(false)
+      );
+    });
+  } catch {
+    return false;
+  }
+}
+
+async function getEligibleSyncWindow({ timeoutMs = 0 } = {}) {
+  const candidates = [];
+  for (const win of Services.wm.getEnumerator("navigator:browser")) {
+    if (isEligibleWindow(win)) {
+      candidates.push(win);
+    }
+  }
+
+  // Prefer windows that completed startup.
+  candidates.sort((a, b) => (b.gZenStartup?.isReady ? 1 : 0) - (a.gZenStartup?.isReady ? 1 : 0));
+
+  for (const win of candidates) {
+    if (await waitForZenReady(win, timeoutMs)) {
+      logGating("getEligibleSyncWindow: selected eligible ready window");
+      return win;
+    }
+    logGating("getEligibleSyncWindow: window not ready, skipping");
+  }
+
+  logGating("getEligibleSyncWindow: no eligible ready window available");
+  return null;
+}
+
+export const __testOnly = {
+  getEligibleSyncWindow(options) {
+    if (!Services.prefs.getBoolPref(PREF_TESTONLY, false)) {
+      throw new Error(
+        "ZenSidebarSync __testOnly is disabled. Set zen.sidebarsync.testonly=true to enable."
+      );
+    }
+    return getEligibleSyncWindow(options);
+  },
+  isEligibleWindow(win) {
+    if (!Services.prefs.getBoolPref(PREF_TESTONLY, false)) {
+      throw new Error(
+        "ZenSidebarSync __testOnly is disabled. Set zen.sidebarsync.testonly=true to enable."
+      );
+    }
+    return isEligibleWindow(win);
+  },
+  waitForZenReady(win, timeoutMs) {
+    if (!Services.prefs.getBoolPref(PREF_TESTONLY, false)) {
+      throw new Error(
+        "ZenSidebarSync __testOnly is disabled. Set zen.sidebarsync.testonly=true to enable."
+      );
+    }
+    return waitForZenReady(win, timeoutMs);
   },
 };
 
@@ -66,16 +205,19 @@ SidebarSyncEngine.prototype = {
   allowSkippedRecord: false,
 
   async getChangedIDs() {
-    let changedIDs = {};
-    if (this._tracker.modified) {
-      // Don't report changes if workspaces aren't enabled yet
-      const win = Services.wm.getMostRecentWindow("navigator:browser");
-      if (!win?.gZenWorkspaces?.workspaceEnabled) {
-        logger.info("Workspaces not enabled, deferring upload");
-        return changedIDs;
-      }
-      changedIDs[lazy.SIDEBAR_SYNC_GUID] = 0;
+    const changedIDs = {};
+    if (!this._tracker.modified) {
+      return changedIDs;
     }
+
+    // Defer upload until we have an eligible, fully initialized window.
+    const win = await getEligibleSyncWindow({ timeoutMs: COLLECT_READY_TIMEOUT_MS });
+    if (!win) {
+      logGating("getChangedIDs: deferring upload (no eligible ready window)");
+      return changedIDs;
+    }
+
+    changedIDs[lazy.SIDEBAR_SYNC_GUID] = 0;
     return changedIDs;
   },
 
@@ -109,14 +251,13 @@ SidebarSyncEngine.prototype = {
   },
 
   async _reconcile(item) {
-    // Check if workspaces are enabled before accepting
-    const win = Services.wm.getMostRecentWindow("navigator:browser");
-    if (!win?.gZenWorkspaces?.workspaceEnabled) {
-      // Reject record so Firefox Sync will retry on next sync
-      logger.info(`Reconcile: rejecting record ${item.id} (workspaces not enabled)`);
+    const win = await getEligibleSyncWindow({ timeoutMs: APPLY_READY_TIMEOUT_MS });
+    if (!win) {
+      // Reject record so Firefox Sync will retry on next sync.
+      logGating(`Reconcile: rejecting record ${item.id} (no eligible ready window)`);
       return false;
     }
-    logger.info(`Reconcile: accepting record ${item.id}`);
+    logGating(`Reconcile: accepting record ${item.id}`);
     return true;
   },
 
@@ -140,25 +281,371 @@ SidebarSyncStore.prototype = {
   // Used to distinguish "new locally" vs "deleted remotely"
   // ==========================================
 
+  _normalizeKnownIdList(ids) {
+    if (!Array.isArray(ids)) {
+      return [];
+    }
+    const normalized = [];
+    const seen = new Set();
+    for (const id of ids) {
+      if (typeof id !== "string" || !id || seen.has(id)) {
+        continue;
+      }
+      seen.add(id);
+      normalized.push(id);
+    }
+    return normalized;
+  },
+
+  _extractEntityIds(entries) {
+    if (!Array.isArray(entries)) {
+      return [];
+    }
+
+    const ids = [];
+    const seen = new Set();
+    for (const entry of entries) {
+      const id = entry?.id;
+      if (typeof id !== "string" || !id || seen.has(id)) {
+        continue;
+      }
+      seen.add(id);
+      ids.push(id);
+    }
+    return ids;
+  },
+
+  _normalizeKnownRemoteIds(raw) {
+    const fallback = {
+      version: KNOWN_REMOTE_IDS_VERSION,
+      source: KNOWN_REMOTE_SOURCE_LEGACY,
+      appliedAt: 0,
+      workspaces: [],
+      folders: [],
+      tabs: [],
+    };
+
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+      return fallback;
+    }
+
+    const sourceIsRemote =
+      raw.source === KNOWN_REMOTE_SOURCE_REMOTE && raw.version === KNOWN_REMOTE_IDS_VERSION;
+
+    return {
+      version: KNOWN_REMOTE_IDS_VERSION,
+      source: sourceIsRemote ? KNOWN_REMOTE_SOURCE_REMOTE : KNOWN_REMOTE_SOURCE_LEGACY,
+      appliedAt: Number.isFinite(raw.appliedAt) ? raw.appliedAt : 0,
+      workspaces: this._normalizeKnownIdList(raw.workspaces),
+      folders: this._normalizeKnownIdList(raw.folders),
+      tabs: this._normalizeKnownIdList(raw.tabs),
+    };
+  },
+
   _getKnownRemoteIds() {
     try {
       const json = Svc.PrefBranch.getStringPref(PREF_KNOWN_REMOTE_IDS, "{}");
-      return JSON.parse(json);
+      return this._normalizeKnownRemoteIds(JSON.parse(json));
     } catch {
-      return { workspaces: [], folders: [], tabs: [] };
+      return this._normalizeKnownRemoteIds(null);
     }
   },
 
   _setKnownRemoteIds(ids) {
-    Svc.PrefBranch.setStringPref(PREF_KNOWN_REMOTE_IDS, JSON.stringify(ids));
+    const normalized = this._normalizeKnownRemoteIds(ids);
+    Svc.PrefBranch.setStringPref(PREF_KNOWN_REMOTE_IDS, JSON.stringify(normalized));
+    return normalized;
   },
 
-  _updateKnownRemoteIds(data) {
-    this._setKnownRemoteIds({
-      workspaces: data.workspaces?.map((w) => w.id) || [],
-      folders: data.folders?.map((f) => f.id) || [],
-      tabs: data.tabs?.map((t) => t.id) || [],
+  _updateKnownRemoteIds(remoteData, options = {}) {
+    const previousKnown = this._normalizeKnownRemoteIds(
+      options.previousKnown ?? this._getKnownRemoteIds()
+    );
+    const updateTypes = {
+      workspaces: options.updateTypes?.workspaces !== false,
+      folders: options.updateTypes?.folders !== false,
+      tabs: options.updateTypes?.tabs !== false,
+    };
+
+    return this._setKnownRemoteIds({
+      version: KNOWN_REMOTE_IDS_VERSION,
+      source: KNOWN_REMOTE_SOURCE_REMOTE,
+      appliedAt: Date.now(),
+      workspaces: updateTypes.workspaces
+        ? this._extractEntityIds(remoteData.workspaces)
+        : previousKnown.workspaces,
+      folders: updateTypes.folders
+        ? this._extractEntityIds(remoteData.folders)
+        : previousKnown.folders,
+      tabs: updateTypes.tabs ? this._extractEntityIds(remoteData.tabs) : previousKnown.tabs,
     });
+  },
+
+  _isNonEmptyString(value) {
+    return typeof value === "string" && value.length > 0;
+  },
+
+  _normalizeNullableString(value) {
+    return typeof value === "string" ? value : null;
+  },
+
+  _normalizeFiniteNumber(value, fallback = 0) {
+    return Number.isFinite(value) ? value : fallback;
+  },
+
+  _normalizeBoolean(value, fallback = false) {
+    return typeof value === "boolean" ? value : fallback;
+  },
+
+  _normalizeRemoteWorkspaceEntry(workspace) {
+    if (!workspace || typeof workspace !== "object") {
+      return null;
+    }
+
+    if (
+      !this._isNonEmptyString(workspace.id) ||
+      !this._isNonEmptyString(workspace.name) ||
+      !Number.isFinite(workspace.position)
+    ) {
+      return null;
+    }
+
+    return {
+      id: workspace.id,
+      name: workspace.name,
+      position: workspace.position,
+      containerTabId: this._normalizeFiniteNumber(workspace.containerTabId, 0),
+      icon: this._normalizeNullableString(workspace.icon),
+      theme: this._normalizeNullableString(workspace.theme),
+      isDefault: this._normalizeBoolean(workspace.isDefault, false),
+      lastModified: Number.isFinite(workspace.lastModified) ? workspace.lastModified : 0,
+    };
+  },
+
+  _normalizeRemoteFolderEntry(folder) {
+    if (!folder || typeof folder !== "object") {
+      return null;
+    }
+
+    if (!this._isNonEmptyString(folder.id)) {
+      return null;
+    }
+
+    return {
+      id: folder.id,
+      name: typeof folder.name === "string" ? folder.name : "",
+      position: this._normalizeFiniteNumber(folder.position, 0),
+      workspaceId: this._normalizeNullableString(folder.workspaceId),
+      parentId: this._normalizeNullableString(folder.parentId),
+      collapsed: this._normalizeBoolean(folder.collapsed, false),
+      icon: this._normalizeNullableString(folder.icon),
+      lastModified: Number.isFinite(folder.lastModified) ? folder.lastModified : 0,
+    };
+  },
+
+  _normalizeRemoteTabEntry(tab, schemaVersion = 1) {
+    if (!tab || typeof tab !== "object") {
+      return null;
+    }
+
+    if (!this._isNonEmptyString(tab.id) || !this._isNonEmptyString(tab.url)) {
+      return null;
+    }
+
+    if (tab.url.startsWith("about:")) {
+      return null;
+    }
+
+    const isEssential = this._normalizeBoolean(tab.isEssential, false);
+    let workspaceId = null;
+    if (!isEssential) {
+      if (!this._isNonEmptyString(tab.workspaceId)) {
+        return null;
+      }
+      workspaceId = tab.workspaceId;
+    }
+
+    const normalized = {
+      id: tab.id,
+      url: tab.url,
+      position: this._normalizeFiniteNumber(tab.position, 0),
+      isEssential,
+      folderId: this._normalizeNullableString(tab.folderId),
+      label: this._normalizeNullableString(tab.label),
+      workspaceId,
+      isPinned: this._normalizeBoolean(tab.isPinned, true),
+      icon: this._normalizeNullableString(tab.icon),
+      lastModified: Number.isFinite(tab.lastModified) ? tab.lastModified : 0,
+      essentialContainerId: 0,
+    };
+
+    if (schemaVersion >= 2) {
+      normalized.essentialContainerId = this._normalizeFiniteNumber(tab.essentialContainerId, 0);
+    }
+
+    return normalized;
+  },
+
+  _validateAndNormalizeRemoteType(type, entries, schemaVersion = 1) {
+    const normalizedEntries = Array.isArray(entries) ? entries : [];
+    const totalCount = normalizedEntries.length;
+    const seenIds = new Set();
+    const valid = [];
+    let invalidCount = 0;
+    let duplicateCount = 0;
+
+    for (const entry of normalizedEntries) {
+      let normalized = null;
+      if (type === "workspaces") {
+        normalized = this._normalizeRemoteWorkspaceEntry(entry);
+      } else if (type === "folders") {
+        normalized = this._normalizeRemoteFolderEntry(entry);
+      } else {
+        normalized = this._normalizeRemoteTabEntry(entry, schemaVersion);
+      }
+
+      if (!normalized) {
+        invalidCount++;
+        continue;
+      }
+
+      if (seenIds.has(normalized.id)) {
+        duplicateCount++;
+        continue;
+      }
+
+      seenIds.add(normalized.id);
+      valid.push(normalized);
+    }
+
+    if (duplicateCount > 0) {
+      logDeletionGuard(`${type}: dropped duplicate IDs=${duplicateCount}`);
+    }
+
+    if (invalidCount > 0) {
+      logDeletionGuard(`${type}: dropped invalid entries=${invalidCount}/${totalCount}`);
+    }
+
+    const invalidRate = totalCount > 0 ? invalidCount / totalCount : 0;
+    const skippedByInvalidCutoff =
+      invalidCount >= INVALID_CUTOFF_MIN_COUNT && invalidRate > INVALID_CUTOFF_RATIO;
+
+    if (skippedByInvalidCutoff) {
+      logDeletionGuard(
+        `${type}: invalid payload cutoff hit (invalid=${invalidCount}, total=${totalCount}, ratio=${invalidRate.toFixed(
+          3
+        )})`
+      );
+    }
+
+    return {
+      valid: skippedByInvalidCutoff ? [] : valid,
+      invalidCount,
+      duplicateCount,
+      totalCount,
+      skippedByInvalidCutoff,
+    };
+  },
+
+  _getValidRemoteWorkspaces(remoteWorkspaces = []) {
+    return this._validateAndNormalizeRemoteType("workspaces", remoteWorkspaces, 1).valid;
+  },
+
+  _getValidRemoteFolders(remoteFolders = []) {
+    return this._validateAndNormalizeRemoteType("folders", remoteFolders, 1).valid;
+  },
+
+  _getValidRemoteTabs(remoteTabs = []) {
+    return this._validateAndNormalizeRemoteType("tabs", remoteTabs, CURRENT_SCHEMA_VERSION).valid;
+  },
+
+  _getLocalWorkspaceCount() {
+    try {
+      const { ZenSessionStore } = ChromeUtils.importESModule(
+        "resource:///modules/zen/ZenSessionManager.sys.mjs"
+      );
+      return (ZenSessionStore.getClonedSpaces() || []).length;
+    } catch {
+      return 0;
+    }
+  },
+
+  _getLocalFolderCount(win) {
+    return win?.document?.querySelectorAll("zen-folder")?.length || 0;
+  },
+
+  _getLocalSidebarTabCount(win) {
+    if (!win?.gBrowser?.tabs) {
+      return 0;
+    }
+
+    let count = 0;
+    for (const tab of win.gBrowser.tabs) {
+      if (!tab?.id || tab.hasAttribute("zen-empty-tab")) {
+        continue;
+      }
+      if (tab.pinned || tab.hasAttribute("zen-essential") || tab.group?.isZenFolder) {
+        count++;
+      }
+    }
+    return count;
+  },
+
+  _buildTypeApplyPolicy(type, knownRemoteIds, localCount, remoteCount) {
+    const knownSource =
+      knownRemoteIds?.source === KNOWN_REMOTE_SOURCE_REMOTE
+        ? KNOWN_REMOTE_SOURCE_REMOTE
+        : KNOWN_REMOTE_SOURCE_LEGACY;
+    const knownIds = this._normalizeKnownIdList(knownRemoteIds?.[type]);
+    const knownCount = knownSource === KNOWN_REMOTE_SOURCE_REMOTE ? knownIds.length : 0;
+
+    const suspiciousEmpty =
+      knownSource === KNOWN_REMOTE_SOURCE_REMOTE &&
+      remoteCount === 0 &&
+      knownCount > 0 &&
+      localCount > 0;
+
+    const suspiciousShrink =
+      knownSource === KNOWN_REMOTE_SOURCE_REMOTE &&
+      knownCount >= MIN_KNOWN_FOR_SHRINK_GUARD &&
+      remoteCount <= Math.floor(knownCount * SHRINK_RATIO) &&
+      localCount > remoteCount;
+
+    if (suspiciousEmpty) {
+      logDeletionGuard(
+        `${type}: suspicious empty payload (local=${localCount}, remote=${remoteCount}, known=${knownCount})`
+      );
+    } else if (suspiciousShrink) {
+      logDeletionGuard(
+        `${type}: suspicious shrink payload (local=${localCount}, remote=${remoteCount}, known=${knownCount}, threshold=${Math.floor(
+          knownCount * SHRINK_RATIO
+        )})`
+      );
+    }
+
+    return {
+      type,
+      knownSource,
+      knownIds,
+      suspiciousEmpty,
+      suspiciousShrink,
+      allowDeletion:
+        knownSource === KNOWN_REMOTE_SOURCE_REMOTE && !suspiciousEmpty && !suspiciousShrink,
+      updateKnown: !suspiciousEmpty && (!suspiciousShrink || remoteCount > 0),
+    };
+  },
+
+  _describeDeletionBlockReason(policy) {
+    if (policy?.suspiciousEmpty) {
+      return "suspicious-empty";
+    }
+    if (policy?.suspiciousShrink) {
+      return "suspicious-shrink";
+    }
+    if (policy?.knownSource !== KNOWN_REMOTE_SOURCE_REMOTE) {
+      return `known-source=${policy?.knownSource || KNOWN_REMOTE_SOURCE_LEGACY}`;
+    }
+    return "deletion-not-authorized";
   },
 
   // ==========================================
@@ -169,23 +656,17 @@ SidebarSyncStore.prototype = {
    * Collect all local sidebar data for syncing to the server.
    * This is called when uploading local changes.
    */
-  collectSyncData() {
-    const win = Services.wm.getMostRecentWindow("navigator:browser");
-    if (!win?.gBrowser || !win?.gZenWorkspaces) {
-      logger.warn("No browser window available");
-      return null;
-    }
-
-    // Don't upload until workspaces are enabled
-    if (!win.gZenWorkspaces.workspaceEnabled) {
-      logger.warn("Workspaces not enabled, skipping upload");
+  async collectSyncData() {
+    const win = await getEligibleSyncWindow({ timeoutMs: COLLECT_READY_TIMEOUT_MS });
+    if (!win) {
+      logGating("collectSyncData: skipping upload (no eligible ready window)");
       return null;
     }
 
     const now = Date.now();
 
     const data = {
-      schemaVersion: 1,
+      schemaVersion: CURRENT_SCHEMA_VERSION,
       lastModified: now,
       workspaces: this.syncWorkspaces(win, now),
       folders: this.syncFolders(win, now),
@@ -195,9 +676,6 @@ SidebarSyncStore.prototype = {
     logger.info(
       `Upload: ${data.workspaces.length} workspaces, ${data.folders.length} folders, ${data.tabs.length} tabs`
     );
-
-    // After uploading, update known remote IDs (these now exist on server)
-    this._updateKnownRemoteIds(data);
 
     return data;
   },
@@ -209,31 +687,118 @@ SidebarSyncStore.prototype = {
   async applyRemoteData(remoteData) {
     logger.info("applyRemoteData called");
 
-    if (!remoteData) {
-      logger.warn("No remote data to apply");
+    if (!remoteData || typeof remoteData !== "object" || Array.isArray(remoteData)) {
+      logger.warn("Skipping apply: invalid root payload (expected object)");
       return;
     }
 
-    const win = Services.wm.getMostRecentWindow("navigator:browser");
-    if (!win?.gZenWorkspaces || win.closed) {
-      logger.warn("No valid browser window");
+    const schemaVersion = Number.isFinite(remoteData.schemaVersion) ? remoteData.schemaVersion : 1;
+    if (schemaVersion > CURRENT_SCHEMA_VERSION) {
+      logDeletionGuard(
+        `SCHEMA_UNSUPPORTED: schemaVersion=${schemaVersion} > current=${CURRENT_SCHEMA_VERSION}`
+      );
+      logger.warn(`Skipping apply: unsupported schemaVersion=${schemaVersion}`);
       return;
     }
 
-    // Check if workspaces are enabled
-    if (!win.gZenWorkspaces.workspaceEnabled) {
-      logger.warn("Workspaces not enabled, skipping sync");
+    const normalizedRemoteData = {
+      workspaces: Array.isArray(remoteData.workspaces) ? remoteData.workspaces : [],
+      folders: Array.isArray(remoteData.folders) ? remoteData.folders : [],
+      tabs: Array.isArray(remoteData.tabs) ? remoteData.tabs : [],
+    };
+
+    const win = await getEligibleSyncWindow({ timeoutMs: APPLY_READY_TIMEOUT_MS });
+    if (!win) {
+      logGating("applyRemoteData: skipping apply (no eligible ready window)");
       return;
     }
 
-    logger.info("Workspaces enabled, proceeding with apply");
-
-    // Get previously known remote IDs to distinguish "new locally" vs "deleted remotely"
+    // Get last successfully applied remote snapshot.
     const knownRemoteIds = this._getKnownRemoteIds();
 
+    const workspaceValidation = this._validateAndNormalizeRemoteType(
+      "workspaces",
+      normalizedRemoteData.workspaces,
+      schemaVersion
+    );
+    const folderValidation = this._validateAndNormalizeRemoteType(
+      "folders",
+      normalizedRemoteData.folders,
+      schemaVersion
+    );
+    const tabValidation = this._validateAndNormalizeRemoteType(
+      "tabs",
+      normalizedRemoteData.tabs,
+      schemaVersion
+    );
+
+    const validRemoteData = {
+      workspaces: workspaceValidation.valid,
+      folders: folderValidation.valid,
+      tabs: tabValidation.valid,
+    };
+
+    const localCounts = {
+      workspaces: this._getLocalWorkspaceCount(),
+      folders: this._getLocalFolderCount(win),
+      tabs: this._getLocalSidebarTabCount(win),
+    };
+
+    const applyPolicies = {
+      workspaces: this._buildTypeApplyPolicy(
+        "workspaces",
+        knownRemoteIds,
+        localCounts.workspaces,
+        validRemoteData.workspaces.length
+      ),
+      folders: this._buildTypeApplyPolicy(
+        "folders",
+        knownRemoteIds,
+        localCounts.folders,
+        validRemoteData.folders.length
+      ),
+      tabs: this._buildTypeApplyPolicy(
+        "tabs",
+        knownRemoteIds,
+        localCounts.tabs,
+        validRemoteData.tabs.length
+      ),
+    };
+
+    if (workspaceValidation.skippedByInvalidCutoff) {
+      logDeletionGuard("workspaces: skipping apply due to invalid-rate cutoff");
+      applyPolicies.workspaces = {
+        ...applyPolicies.workspaces,
+        allowDeletion: false,
+        updateKnown: false,
+        skipApply: true,
+        invalidPayload: true,
+      };
+    }
+    if (folderValidation.skippedByInvalidCutoff) {
+      logDeletionGuard("folders: skipping apply due to invalid-rate cutoff");
+      applyPolicies.folders = {
+        ...applyPolicies.folders,
+        allowDeletion: false,
+        updateKnown: false,
+        skipApply: true,
+        invalidPayload: true,
+      };
+    }
+    if (tabValidation.skippedByInvalidCutoff) {
+      logDeletionGuard("tabs: skipping apply due to invalid-rate cutoff");
+      applyPolicies.tabs = {
+        ...applyPolicies.tabs,
+        allowDeletion: false,
+        updateKnown: false,
+        skipApply: true,
+        invalidPayload: true,
+      };
+    }
+
     logger.info(
-      `Download: ${remoteData.workspaces?.length || 0} workspaces, ` +
-        `${remoteData.folders?.length || 0} folders, ${remoteData.tabs?.length || 0} tabs`
+      `Download: ${validRemoteData.workspaces.length} workspaces, ` +
+        `${validRemoteData.folders.length} folders, ${validRemoteData.tabs.length} tabs`
     );
 
     // IMPORTANT: Ignore tracker changes during apply to prevent immediate re-upload
@@ -248,16 +813,99 @@ SidebarSyncStore.prototype = {
     try {
       // Apply in order: workspaces first, then folders, then tabs
       // applyFolders returns a map of folder elements so applyTabs can use it
-      await this.applyWorkspaces(remoteData.workspaces || [], win, knownRemoteIds.workspaces || []);
-      const folderMap = await this.applyFolders(
-        remoteData.folders || [],
-        win,
-        knownRemoteIds.folders || []
-      );
-      await this.applyTabs(remoteData.tabs || [], win, knownRemoteIds.tabs || [], folderMap);
+      let workspacesApplied = true;
+      if (applyPolicies.workspaces.skipApply) {
+        workspacesApplied = false;
+      } else {
+        workspacesApplied =
+          (await this.applyWorkspaces(
+            validRemoteData.workspaces,
+            win,
+            applyPolicies.workspaces
+          )) !== false;
+      }
 
-      // Update known remote IDs with what we just received
-      this._updateKnownRemoteIds(remoteData);
+      let folderMap = new Map();
+      let remoteFoldersForLayout = validRemoteData.folders;
+      let foldersApplied = true;
+      if (applyPolicies.folders.skipApply) {
+        foldersApplied = false;
+      } else {
+        const folderResult = await this.applyFolders(
+          validRemoteData.folders,
+          win,
+          applyPolicies.folders
+        );
+        if (folderResult instanceof Map) {
+          folderMap = folderResult;
+        } else if (folderResult === false) {
+          foldersApplied = false;
+        } else if (folderResult && typeof folderResult === "object") {
+          if (folderResult.folderMap instanceof Map) {
+            folderMap = folderResult.folderMap;
+          }
+          if (Array.isArray(folderResult.remoteFolders)) {
+            remoteFoldersForLayout = folderResult.remoteFolders;
+          }
+          foldersApplied = folderResult.success !== false;
+        }
+      }
+
+      let tabMap = new Map();
+      let tabsApplied = true;
+      if (applyPolicies.tabs.skipApply) {
+        tabsApplied = false;
+      } else {
+        const tabResult = await this.applyTabs(
+          validRemoteData.tabs,
+          win,
+          applyPolicies.tabs,
+          folderMap
+        );
+        if (tabResult instanceof Map) {
+          tabMap = tabResult;
+        } else if (tabResult === false) {
+          tabsApplied = false;
+        } else if (tabResult && typeof tabResult === "object") {
+          if (tabResult.tabMap instanceof Map) {
+            tabMap = tabResult.tabMap;
+          }
+          tabsApplied = tabResult.success !== false;
+        }
+      }
+
+      const hasLayoutMaps = folderMap.size > 0 || tabMap.size > 0;
+      if ((foldersApplied || tabsApplied) && hasLayoutMaps) {
+        const layoutRemoteData = {
+          ...validRemoteData,
+          folders: remoteFoldersForLayout,
+        };
+
+        await this.positionMixedTopLevelItems(layoutRemoteData, win, folderMap, tabMap, {
+          includeFolders: foldersApplied,
+          includeTabs: tabsApplied,
+        });
+
+        this.positionMixedNestedFolderItems(layoutRemoteData, win, folderMap, tabMap, {
+          includeFolders: foldersApplied,
+          includeTabs: tabsApplied,
+        });
+      }
+
+      const updateTypes = {
+        workspaces: applyPolicies.workspaces.updateKnown && workspacesApplied,
+        folders: applyPolicies.folders.updateKnown && foldersApplied,
+        tabs: applyPolicies.tabs.updateKnown && tabsApplied,
+      };
+
+      if (updateTypes.workspaces || updateTypes.folders || updateTypes.tabs) {
+        this._updateKnownRemoteIds(validRemoteData, {
+          previousKnown: knownRemoteIds,
+          updateTypes,
+        });
+      } else {
+        logDeletionGuard("knownRemoteIds: skipping update (no types eligible)");
+      }
     } catch (e) {
       logger.error(`Failed to apply remote data: ${e.message}`);
       console.error(e);
@@ -331,7 +979,10 @@ SidebarSyncStore.prototype = {
       let childPosition = 0;
       for (const item of folder.allItems || []) {
         if (item.isZenFolder) {
-          processFolder(item, childPosition++, folder.id);
+          processFolder(item, childPosition, folder.id);
+        }
+        if (item.isZenFolder || win.gBrowser.isTab(item)) {
+          childPosition++;
         }
       }
     };
@@ -408,7 +1059,7 @@ SidebarSyncStore.prototype = {
       }
 
       seenIds.add(tab.id);
-      tabs.push(this.syncTab(tab, position, folderId, timestamp));
+      tabs.push(this.syncTab(tab, position, folderId, timestamp, win));
     };
 
     // Helper to recursively collect tabs from folders
@@ -464,10 +1115,17 @@ SidebarSyncStore.prototype = {
   /**
    * Collect data for a single tab.
    */
-  syncTab(tab, position, folderId, timestamp) {
+  syncTab(tab, position, folderId, timestamp, win) {
     const isEssential = tab.hasAttribute("zen-essential");
 
-    return {
+    let essentialContainerId = 0;
+    if (isEssential && win?.gZenWorkspaces?.containerSpecificEssentials) {
+      const rawContainerId = tab.getAttribute("usercontextid") ?? tab.userContextId ?? 0;
+      const parsedContainerId = Number(rawContainerId);
+      essentialContainerId = Number.isFinite(parsedContainerId) ? parsedContainerId : 0;
+    }
+
+    const syncedTab = {
       // Identity
       id: tab.id,
       // Properties
@@ -483,6 +1141,12 @@ SidebarSyncStore.prototype = {
       position,
       lastModified: timestamp,
     };
+
+    if (isEssential) {
+      syncedTab.essentialContainerId = essentialContainerId;
+    }
+
+    return syncedTab;
   },
 
   // ==========================================
@@ -499,9 +1163,9 @@ SidebarSyncStore.prototype = {
    *
    * @param {Array} remoteWorkspaces - Remote workspace data from server
    * @param {Window} win - Browser window
-   * @param {Array} knownRemoteIds - IDs that were on server in last sync (to detect remote deletions)
+   * @param {object} deletionPolicy - Deletion guard policy for workspace IDs
    */
-  async applyWorkspaces(remoteWorkspaces, win, knownRemoteIds) {
+  async applyWorkspaces(remoteWorkspaces, win, deletionPolicy = {}) {
     try {
       const { ZenSessionStore } = ChromeUtils.importESModule(
         "resource:///modules/zen/ZenSessionManager.sys.mjs"
@@ -511,21 +1175,13 @@ SidebarSyncStore.prototype = {
       const localWorkspaces = ZenSessionStore.getClonedSpaces() || [];
       if (!localWorkspaces.length && !remoteWorkspaces.length) {
         logger.warn("No workspaces to process");
-        return;
+        return true;
       }
 
       const localById = new Map(localWorkspaces.map((ws) => [ws.uuid, ws]));
-      const remoteById = new Map(remoteWorkspaces.map((ws) => [ws.id, ws]));
-      const knownRemoteSet = new Set(knownRemoteIds);
-
-      // Validate remote data - filter out invalid entries
-      const validRemote = remoteWorkspaces.filter((ws) => {
-        if (!ws.id || !ws.name) {
-          logger.warn(`Skipping invalid workspace: missing id or name`);
-          return false;
-        }
-        return true;
-      });
+      const validRemote = Array.isArray(remoteWorkspaces) ? remoteWorkspaces : [];
+      const remoteById = new Map(validRemote.map((ws) => [ws.id, ws]));
+      const knownRemoteSet = new Set(this._normalizeKnownIdList(deletionPolicy.knownIds));
 
       // Sort remote by position
       const sortedRemote = [...validRemote].sort((a, b) => a.position - b.position);
@@ -549,13 +1205,18 @@ SidebarSyncStore.prototype = {
       // Process local workspaces not in remote
       for (const local of localWorkspaces) {
         if (!remoteById.has(local.uuid)) {
-          if (knownRemoteSet.has(local.uuid)) {
+          if (deletionPolicy.allowDeletion && knownRemoteSet.has(local.uuid)) {
             // Was on server before, now gone → deleted remotely
             changes.deleted.push(local.name);
+            logDeletionGuard(`workspaces: delete id=${local.uuid}`);
           } else {
             // Never was on server → new locally, keep it
             newWorkspaces.push(local);
             changes.kept.push(local.name);
+            const reason = deletionPolicy.allowDeletion
+              ? "id-not-known-remote"
+              : this._describeDeletionBlockReason(deletionPolicy);
+            logDeletionGuard(`workspaces: keep id=${local.uuid} (${reason})`);
           }
         }
       }
@@ -597,9 +1258,11 @@ SidebarSyncStore.prototype = {
       if (parts.length) {
         logger.info(`Workspaces - ${parts.join("; ")}`);
       }
+      return true;
     } catch (e) {
       logger.error(`Failed to apply workspaces: ${e.message}`);
       console.error(e);
+      return false;
     }
   },
 
@@ -610,8 +1273,7 @@ SidebarSyncStore.prototype = {
   applyWorkspace(remote, _local) {
     // containerTabId must always be a number - 0 is the default container
     // This is required for ZenWorkspaces animation code to work correctly
-    const containerTabId =
-      typeof remote.containerTabId === "number" ? remote.containerTabId : 0;
+    const containerTabId = typeof remote.containerTabId === "number" ? remote.containerTabId : 0;
 
     // Remote is always authoritative - return workspace with all remote properties
     return {
@@ -632,32 +1294,144 @@ SidebarSyncStore.prototype = {
    * @returns {Array} Sorted array with parents before children
    */
   _topologicalSortFolders(folders) {
-    const result = [];
-    const added = new Set();
-    const folderMap = new Map(folders.map((f) => [f.id, f]));
-
-    // Helper to add folder and all its ancestors first
-    const addWithAncestors = (folder) => {
-      if (added.has(folder.id)) {
-        return;
+    const compareFolders = (a, b) => {
+      const byPosition =
+        this._normalizeFiniteNumber(a.position, 0) - this._normalizeFiniteNumber(b.position, 0);
+      if (byPosition !== 0) {
+        return byPosition;
       }
-      // If has parent, add parent first
-      if (folder.parentId && folderMap.has(folder.parentId)) {
-        addWithAncestors(folderMap.get(folder.parentId));
-      }
-      added.add(folder.id);
-      result.push(folder);
+      return a.id.localeCompare(b.id);
     };
 
-    // Sort by position first for stable ordering within same level
-    const sortedByPosition = [...folders].sort((a, b) => a.position - b.position);
+    const allFolders = Array.isArray(folders) ? folders : [];
+    const folderMap = new Map(allFolders.map((folder) => [folder.id, folder]));
+    const childrenByParent = new Map();
 
-    // Add all folders (ancestors will be added first)
-    for (const folder of sortedByPosition) {
-      addWithAncestors(folder);
+    const pushChild = (parentId, folder) => {
+      const key = parentId ?? null;
+      if (!childrenByParent.has(key)) {
+        childrenByParent.set(key, []);
+      }
+      childrenByParent.get(key).push(folder);
+    };
+
+    for (const folder of allFolders) {
+      const parentId = folder.parentId && folderMap.has(folder.parentId) ? folder.parentId : null;
+      pushChild(parentId, folder);
+    }
+
+    for (const children of childrenByParent.values()) {
+      children.sort(compareFolders);
+    }
+
+    const result = [];
+    const visited = new Set();
+    const visit = (folder) => {
+      if (!folder || visited.has(folder.id)) {
+        return;
+      }
+      visited.add(folder.id);
+      result.push(folder);
+
+      const children = childrenByParent.get(folder.id) || [];
+      for (const child of children) {
+        visit(child);
+      }
+    };
+
+    for (const root of childrenByParent.get(null) || []) {
+      visit(root);
+    }
+
+    // Safety fallback for any disconnected/unreachable node.
+    for (const folder of [...allFolders].sort(compareFolders)) {
+      visit(folder);
     }
 
     return result;
+  },
+
+  _sanitizeRemoteFolderGraph(remoteFolders) {
+    const sanitized = (Array.isArray(remoteFolders) ? remoteFolders : []).map((folder) => ({
+      ...folder,
+    }));
+    const folderMap = new Map(sanitized.map((folder) => [folder.id, folder]));
+
+    for (const folder of sanitized) {
+      if (folder.parentId && !folderMap.has(folder.parentId)) {
+        logGating(
+          `folders: parent missing id=${folder.id} parentId=${folder.parentId}, promoting to top-level`
+        );
+        folder.parentId = null;
+      }
+    }
+
+    const stateById = new Map();
+    const stack = [];
+    const stackIndexById = new Map();
+
+    const breakCycle = (cycleIds) => {
+      if (!cycleIds.length) {
+        return;
+      }
+
+      let breakId = cycleIds[0];
+      for (const id of cycleIds) {
+        if (id.localeCompare(breakId) < 0) {
+          breakId = id;
+        }
+      }
+
+      const folderToPromote = folderMap.get(breakId);
+      if (!folderToPromote || folderToPromote.parentId == null) {
+        return;
+      }
+
+      logGating(`folders: cycle detected [${cycleIds.join(",")}] -> break id=${breakId}`);
+      folderToPromote.parentId = null;
+    };
+
+    const visit = (folderId) => {
+      const state = stateById.get(folderId) || 0;
+      if (state === 2) {
+        return;
+      }
+      if (state === 1) {
+        const startIndex = stackIndexById.get(folderId);
+        if (Number.isInteger(startIndex) && startIndex >= 0) {
+          breakCycle(stack.slice(startIndex));
+        }
+        return;
+      }
+
+      stateById.set(folderId, 1);
+      stackIndexById.set(folderId, stack.length);
+      stack.push(folderId);
+
+      const folder = folderMap.get(folderId);
+      const parentId = folder?.parentId;
+      if (parentId && folderMap.has(parentId)) {
+        const parentState = stateById.get(parentId) || 0;
+        if (parentState === 1) {
+          const startIndex = stackIndexById.get(parentId);
+          if (Number.isInteger(startIndex) && startIndex >= 0) {
+            breakCycle(stack.slice(startIndex));
+          }
+        } else {
+          visit(parentId);
+        }
+      }
+
+      stack.pop();
+      stackIndexById.delete(folderId);
+      stateById.set(folderId, 2);
+    };
+
+    for (const folderId of [...folderMap.keys()].sort((a, b) => a.localeCompare(b))) {
+      visit(folderId);
+    }
+
+    return sanitized;
   },
 
   /**
@@ -666,12 +1440,12 @@ SidebarSyncStore.prototype = {
    *
    * @param {Array} remoteFolders - Remote folder data from server
    * @param {Window} win - Browser window
-   * @param {Array} knownRemoteIds - IDs that were on server in last sync (to detect remote deletions)
+   * @param {object} deletionPolicy - Deletion guard policy for folder IDs
    * @returns {Map} Map of folder ID to folder element (for use by applyTabs)
    */
-  async applyFolders(remoteFolders, win, knownRemoteIds) {
+  async applyFolders(remoteFolders, win, deletionPolicy = {}) {
     if (!win.gZenFolders) {
-      return new Map();
+      return { folderMap: new Map(), success: false };
     }
 
     try {
@@ -684,14 +1458,14 @@ SidebarSyncStore.prototype = {
         }
       }
 
-      // Validate remote data
-      const validRemote = remoteFolders.filter((f) => f.id);
-      const remoteById = new Map(validRemote.map((f) => [f.id, f]));
-      const knownRemoteSet = new Set(knownRemoteIds);
+      const validRemote = Array.isArray(remoteFolders) ? remoteFolders : [];
+      const sanitizedRemote = this._sanitizeRemoteFolderGraph(validRemote);
+      const remoteById = new Map(sanitizedRemote.map((f) => [f.id, f]));
+      const knownRemoteSet = new Set(this._normalizeKnownIdList(deletionPolicy.knownIds));
 
       // Topological sort: parents before children
       // This ensures nested folders are created in the right order
-      const sortedRemote = this._topologicalSortFolders(validRemote);
+      const sortedRemote = this._topologicalSortFolders(sanitizedRemote);
 
       const changes = { created: [], updated: [], deleted: [], kept: [] };
 
@@ -717,19 +1491,21 @@ SidebarSyncStore.prototype = {
       // DELETE local folders not in remote - but only if they were previously known
       for (const [id, elem] of localById) {
         if (!remoteById.has(id)) {
-          if (knownRemoteSet.has(id)) {
+          if (deletionPolicy.allowDeletion && knownRemoteSet.has(id)) {
             // Was on server before, now gone → deleted remotely
             changes.deleted.push(elem.label || id);
             elem.delete?.();
+            logDeletionGuard(`folders: delete id=${id}`);
           } else {
             // Never was on server → new locally, keep it
             changes.kept.push(elem.label || id);
+            const reason = deletionPolicy.allowDeletion
+              ? "id-not-known-remote"
+              : this._describeDeletionBlockReason(deletionPolicy);
+            logDeletionGuard(`folders: keep id=${id} (${reason})`);
           }
         }
       }
-
-      // Position folders
-      this.positionFolders(validRemote, localById, win);
 
       const parts = [];
       if (changes.created.length) {
@@ -748,11 +1524,11 @@ SidebarSyncStore.prototype = {
         logger.info(`Folders - ${parts.join("; ")}`);
       }
 
-      return localById;
+      return { folderMap: localById, remoteFolders: sanitizedRemote, success: true };
     } catch (e) {
       logger.error(`Failed to apply folders: ${e.message}`);
       console.error(e);
-      return new Map();
+      return { folderMap: new Map(), remoteFolders: [], success: false };
     }
   },
 
@@ -882,10 +1658,10 @@ SidebarSyncStore.prototype = {
    *
    * @param {Array} remoteTabs - Remote tab data from server
    * @param {Window} win - Browser window
-   * @param {Array} knownRemoteIds - IDs that were on server in last sync (to detect remote deletions)
+   * @param {object} deletionPolicy - Deletion guard policy for tab IDs
    * @param {Map} folderMap - Map of folder ID to folder element (from applyFolders)
    */
-  async applyTabs(remoteTabs, win, knownRemoteIds, folderMap = new Map()) {
+  async applyTabs(remoteTabs, win, deletionPolicy = {}, folderMap = new Map()) {
     try {
       // Get local tabs
       const localById = new Map();
@@ -895,31 +1671,43 @@ SidebarSyncStore.prototype = {
         }
       }
 
-      // Validate remote data
-      const validRemote = remoteTabs.filter((t) => {
-        if (!t.id || !t.url) {
-          logger.warn(`Skipping invalid tab: missing id or url`);
-          return false;
-        }
-        return true;
-      });
+      const validRemote = Array.isArray(remoteTabs) ? remoteTabs : [];
 
       const remoteById = new Map(validRemote.map((t) => [t.id, t]));
-      const knownRemoteSet = new Set(knownRemoteIds);
+      const knownRemoteSet = new Set(this._normalizeKnownIdList(deletionPolicy.knownIds));
 
       const changes = { created: [], updated: [], deleted: [], kept: [] };
 
       // CREATE or UPDATE tabs
       for (const remote of validRemote) {
         let tab = localById.get(remote.id);
+        let matchedByUrl = false;
 
         // URL fallback match
         if (!tab) {
           for (const t of win.gBrowser.tabs) {
             if (t.linkedBrowser?.currentURI?.spec === remote.url && !localById.has(t.id)) {
               tab = t;
+              matchedByUrl = true;
               break;
             }
+          }
+        }
+
+        if (tab && matchedByUrl) {
+          const existingWithRemoteId = win.document.getElementById(remote.id);
+          if (!existingWithRemoteId || existingWithRemoteId === tab) {
+            const previousId = tab.id;
+            if (previousId !== remote.id) {
+              tab.id = remote.id;
+              if (this._isNonEmptyString(previousId) && previousId !== remote.id) {
+                localById.delete(previousId);
+              }
+            }
+            logGating(`tabs: url fallback matched id=${remote.id}, reusing local tab`);
+          } else {
+            logGating(`tabs: url fallback collision id=${remote.id}, creating new tab`);
+            tab = null;
           }
         }
 
@@ -941,18 +1729,23 @@ SidebarSyncStore.prototype = {
       // DELETE local tabs not in remote - but only if they were previously known
       for (const [id, tab] of localById) {
         if (!remoteById.has(id) && (tab.pinned || tab.hasAttribute("zen-essential"))) {
-          if (knownRemoteSet.has(id)) {
+          if (deletionPolicy.allowDeletion && knownRemoteSet.has(id)) {
             // Was on server before, now gone → deleted remotely
             changes.deleted.push(tab.linkedBrowser?.currentURI?.spec || id);
             win.gBrowser.removeTab(tab, { animate: false });
+            logDeletionGuard(`tabs: delete id=${id}`);
           } else {
             // Never was on server → new locally, keep it
             changes.kept.push(tab.linkedBrowser?.currentURI?.spec || id);
+            const reason = deletionPolicy.allowDeletion
+              ? "id-not-known-remote"
+              : this._describeDeletionBlockReason(deletionPolicy);
+            logDeletionGuard(`tabs: keep id=${id} (${reason})`);
           }
         }
       }
 
-      // Position tabs (pass folderMap to look up folders directly)
+      // Position non-top-level tabs (folder/essentials only).
       this.positionTabs(validRemote, localById, win, folderMap);
 
       const parts = [];
@@ -974,9 +1767,11 @@ SidebarSyncStore.prototype = {
 
       // Refresh tab system cache (required after modifying tab structure)
       win.gBrowser.tabContainer._invalidateCachedTabs?.();
+      return { tabMap: localById, success: true };
     } catch (e) {
       logger.error(`Failed to apply tabs: ${e.message}`);
       console.error(e);
+      return { tabMap: new Map(), success: false };
     }
   },
 
@@ -990,18 +1785,19 @@ SidebarSyncStore.prototype = {
       pinned: true,
       triggeringPrincipal: Services.scriptSecurityManager.getSystemPrincipal(),
       createLazyBrowser: true,
+      zenForcedSyncId: remote.id,
+      zenWorkspaceId: remote.workspaceId,
+      essential: remote.isEssential,
     };
 
-    // Set workspace for the tab if not essential
-    if (!remote.isEssential && remote.workspaceId) {
-      options.workspaceId = remote.workspaceId;
-    }
-
     const tab = win.gBrowser.addTab(remote.url, options);
-    win.gBrowser.pinTab(tab);
 
-    // Set the ID to match remote
-    tab.id = remote.id;
+    if (this._isNonEmptyString(remote.id)) {
+      const existingWithRemoteId = win.document.getElementById(remote.id);
+      if (!existingWithRemoteId || existingWithRemoteId === tab) {
+        tab.id = remote.id;
+      }
+    }
 
     // Apply other properties
     this.applyTab(remote, tab, win);
@@ -1013,41 +1809,343 @@ SidebarSyncStore.prototype = {
    * Apply remote data to an existing tab.
    */
   applyTab(remote, tab, win) {
+    if (!tab.pinned) {
+      win.gBrowser.pinTab(tab);
+    }
+
     // Essential state
     if (remote.isEssential) {
       tab.setAttribute("zen-essential", "true");
       tab.removeAttribute("zen-workspace-id");
     } else {
       tab.removeAttribute("zen-essential");
-      if (remote.workspaceId) {
+      if (this._isNonEmptyString(remote.workspaceId)) {
         tab.setAttribute("zen-workspace-id", remote.workspaceId);
+      } else {
+        tab.removeAttribute("zen-workspace-id");
       }
     }
 
     // Label
-    if (remote.label) {
+    if (this._isNonEmptyString(remote.label)) {
       tab._zenChangeLabelFlag = true;
-      tab.zenStaticLabel = remote.label;
-      win.gBrowser._setTabLabel(tab, remote.label);
-      delete tab._zenChangeLabelFlag;
+      try {
+        tab.zenStaticLabel = remote.label;
+        win.gBrowser._setTabLabel(tab, remote.label);
+      } finally {
+        delete tab._zenChangeLabelFlag;
+      }
+    }
+
+    // Icon
+    if (this._isNonEmptyString(remote.icon)) {
+      tab.zenStaticIcon = remote.icon;
+      tab.setAttribute("image", remote.icon);
+      if (remote.isEssential) {
+        win.gZenPinnedTabManager?.setEssentialTabIcon?.(tab, remote.icon);
+      }
     }
   },
 
+  _compareMixedLayoutItems(a, b) {
+    const byPosition = a.position - b.position;
+    if (byPosition !== 0) {
+      return byPosition;
+    }
+
+    if (a.kind !== b.kind) {
+      return a.kind === "folder" ? -1 : 1;
+    }
+
+    return a.id.localeCompare(b.id);
+  },
+
+  _buildMixedLayout(remoteData, workspaceId, options = {}) {
+    const includeFolders = options.includeFolders !== false;
+    const includeTabs = options.includeTabs !== false;
+    const items = [];
+
+    if (includeFolders) {
+      for (const folder of remoteData.folders || []) {
+        if (folder.workspaceId === workspaceId && folder.parentId == null) {
+          items.push({
+            kind: "folder",
+            id: folder.id,
+            workspaceId,
+            position: this._normalizeFiniteNumber(folder.position, 0),
+          });
+        }
+      }
+    }
+
+    if (includeTabs) {
+      for (const tab of remoteData.tabs || []) {
+        if (!tab.isEssential && tab.workspaceId === workspaceId && tab.folderId == null) {
+          items.push({
+            kind: "tab",
+            id: tab.id,
+            workspaceId,
+            position: this._normalizeFiniteNumber(tab.position, 0),
+          });
+        }
+      }
+    }
+
+    items.sort((a, b) => this._compareMixedLayoutItems(a, b));
+    return items;
+  },
+
+  _ensureWorkspaceItemNode(item, win, remoteById, folderMap, tabMap) {
+    if (item.kind === "folder") {
+      let folder = folderMap.get(item.id) || win.document.getElementById(item.id);
+      if (!folder) {
+        const remoteFolder = remoteById.folders.get(item.id);
+        if (!remoteFolder) {
+          logGating(`mixed-ordering: missing remote folder id=${item.id}`);
+          return null;
+        }
+        folder = this.createFolder(remoteFolder, win, folderMap);
+      }
+      if (folder) {
+        folderMap.set(item.id, folder);
+      }
+      return folder;
+    }
+
+    let tab = tabMap.get(item.id) || win.document.getElementById(item.id);
+    if (!tab) {
+      const remoteTab = remoteById.tabs.get(item.id);
+      if (!remoteTab) {
+        logGating(`mixed-ordering: missing remote tab id=${item.id}`);
+        return null;
+      }
+      tab = this.createTab(remoteTab, win);
+    }
+
+    if (tab) {
+      tabMap.set(item.id, tab);
+    }
+    return tab;
+  },
+
+  async _applyMixedLayoutForWorkspace(win, container, layout, remoteById, folderMap, tabMap) {
+    const separator = container.querySelector(".pinned-tabs-container-separator");
+    const firstReference = separator || null;
+    let previousNode = null;
+
+    for (const item of layout) {
+      const node = this._ensureWorkspaceItemNode(item, win, remoteById, folderMap, tabMap);
+      if (!node) {
+        logGating(`mixed-ordering: skipping unresolved ${item.kind} id=${item.id}`);
+        continue;
+      }
+
+      if (previousNode) {
+        previousNode.after(node);
+      } else {
+        container.insertBefore(node, firstReference);
+      }
+
+      previousNode = node;
+    }
+  },
+
+  async positionMixedTopLevelItems(
+    remoteData,
+    win,
+    folderMap = new Map(),
+    tabMap = new Map(),
+    options = {}
+  ) {
+    const includeFolders = options.includeFolders !== false;
+    const includeTabs = options.includeTabs !== false;
+    const workspaceIds = [];
+    const seenWorkspaceIds = new Set();
+
+    const sortedRemoteWorkspaces = [...(remoteData.workspaces || [])].sort((a, b) =>
+      this._compareMixedLayoutItems(
+        { kind: "folder", id: a.id, position: this._normalizeFiniteNumber(a.position, 0) },
+        { kind: "folder", id: b.id, position: this._normalizeFiniteNumber(b.position, 0) }
+      )
+    );
+
+    for (const workspace of sortedRemoteWorkspaces) {
+      if (!this._isNonEmptyString(workspace.id) || seenWorkspaceIds.has(workspace.id)) {
+        continue;
+      }
+      seenWorkspaceIds.add(workspace.id);
+      workspaceIds.push(workspace.id);
+    }
+
+    if (includeFolders) {
+      for (const folder of remoteData.folders || []) {
+        if (
+          !this._isNonEmptyString(folder.workspaceId) ||
+          seenWorkspaceIds.has(folder.workspaceId)
+        ) {
+          continue;
+        }
+        seenWorkspaceIds.add(folder.workspaceId);
+        workspaceIds.push(folder.workspaceId);
+      }
+    }
+
+    if (includeTabs) {
+      for (const tab of remoteData.tabs || []) {
+        if (
+          tab.isEssential ||
+          tab.folderId != null ||
+          !this._isNonEmptyString(tab.workspaceId) ||
+          seenWorkspaceIds.has(tab.workspaceId)
+        ) {
+          continue;
+        }
+        seenWorkspaceIds.add(tab.workspaceId);
+        workspaceIds.push(tab.workspaceId);
+      }
+    }
+
+    const remoteById = {
+      folders: new Map((remoteData.folders || []).map((folder) => [folder.id, folder])),
+      tabs: new Map((remoteData.tabs || []).map((tab) => [tab.id, tab])),
+    };
+
+    for (const workspaceId of workspaceIds) {
+      const wsElem = win.gZenWorkspaces.workspaceElement(workspaceId);
+      const container = wsElem?.pinnedTabsContainer || win.gZenWorkspaces.pinnedTabsContainer;
+      if (!container) {
+        continue;
+      }
+
+      const layout = this._buildMixedLayout(remoteData, workspaceId, {
+        includeFolders,
+        includeTabs,
+      });
+      if (!layout.length) {
+        continue;
+      }
+
+      await this._applyMixedLayoutForWorkspace(
+        win,
+        container,
+        layout,
+        remoteById,
+        folderMap,
+        tabMap
+      );
+    }
+
+    win.gBrowser.tabContainer._invalidateCachedTabs?.();
+  },
+
+  _buildNestedFolderMixedLayout(remoteData, folderId, options = {}) {
+    const includeFolders = options.includeFolders !== false;
+    const includeTabs = options.includeTabs !== false;
+    const items = [];
+
+    if (includeFolders) {
+      for (const folder of remoteData.folders || []) {
+        if (folder.parentId === folderId) {
+          items.push({
+            kind: "folder",
+            id: folder.id,
+            position: this._normalizeFiniteNumber(folder.position, 0),
+          });
+        }
+      }
+    }
+
+    if (includeTabs) {
+      for (const tab of remoteData.tabs || []) {
+        if (tab.folderId === folderId) {
+          items.push({
+            kind: "tab",
+            id: tab.id,
+            position: this._normalizeFiniteNumber(tab.position, 0),
+          });
+        }
+      }
+    }
+
+    items.sort((a, b) => this._compareMixedLayoutItems(a, b));
+    return items;
+  },
+
+  positionMixedNestedFolderItems(
+    remoteData,
+    win,
+    folderMap = new Map(),
+    tabMap = new Map(),
+    options = {}
+  ) {
+    const sortedFolders = this._topologicalSortFolders(remoteData.folders || []);
+
+    for (const remoteFolder of sortedFolders) {
+      const folderElement =
+        folderMap.get(remoteFolder.id) || win.document.getElementById(remoteFolder.id);
+      if (!folderElement) {
+        logGating(`nested-ordering: folder not found id=${remoteFolder.id}`);
+        continue;
+      }
+
+      const layout = this._buildNestedFolderMixedLayout(remoteData, remoteFolder.id, options);
+      if (!layout.length) {
+        continue;
+      }
+
+      const groupContainer = folderElement.groupContainer;
+      if (!groupContainer) {
+        logGating(`nested-ordering: missing groupContainer id=${remoteFolder.id}`);
+        continue;
+      }
+
+      const emptyTab = folderElement.tabs?.find((tab) => tab.hasAttribute("zen-empty-tab")) || null;
+      if (!emptyTab) {
+        logGating(`nested-ordering: missing empty tab id=${remoteFolder.id}`);
+      }
+
+      let previousNode = emptyTab;
+      for (const item of layout) {
+        const node =
+          item.kind === "folder"
+            ? folderMap.get(item.id) || win.document.getElementById(item.id)
+            : tabMap.get(item.id) || win.document.getElementById(item.id);
+
+        if (!node) {
+          logGating(`nested-ordering: missing child ${item.kind} id=${item.id}`);
+          continue;
+        }
+
+        if (previousNode) {
+          previousNode.after(node);
+        } else {
+          groupContainer.insertBefore(node, groupContainer.firstChild);
+        }
+        previousNode = node;
+      }
+    }
+
+    win.gBrowser.tabContainer._invalidateCachedTabs?.();
+  },
+
   /**
-   * Position all tabs according to remote positions.
-   * This handles moving tabs to correct containers (folders, workspaces, essentials).
+   * Position non-top-level tabs according to remote positions.
+   * This handles moving tabs to folder and essentials containers.
    */
   positionTabs(remoteTabs, localById, win, folderMap = new Map()) {
-    // Group by container
+    // Group by non-top-level container only.
     const byContainer = new Map();
     for (const remote of remoteTabs) {
+      if (!remote.isEssential && !remote.folderId) {
+        continue;
+      }
+
       let key;
       if (remote.isEssential) {
-        key = "essentials";
-      } else if (remote.folderId) {
-        key = `folder:${remote.folderId}`;
+        const cid = Number.isFinite(remote.essentialContainerId) ? remote.essentialContainerId : 0;
+        key = `essentials:${cid}`;
       } else {
-        key = `workspace:${remote.workspaceId || "default"}`;
+        key = `folder:${remote.folderId}`;
       }
 
       if (!byContainer.has(key)) {
@@ -1056,34 +2154,34 @@ SidebarSyncStore.prototype = {
       byContainer.get(key).push(remote);
     }
 
-    // Position each container's tabs
+    // Position each container's tabs.
     for (const [containerId, tabs] of byContainer) {
-      tabs.sort((a, b) => a.position - b.position);
+      tabs.sort((a, b) => a.position - b.position || a.id.localeCompare(b.id));
 
-      // Get container element
+      // Get container element.
       let container;
       let isFolder = false;
-      if (containerId === "essentials") {
-        container = win.gZenWorkspaces?.getEssentialsSection?.(0);
+      if (containerId === "essentials" || containerId.startsWith("essentials:")) {
+        const cid = containerId.startsWith("essentials:")
+          ? Number(containerId.slice("essentials:".length))
+          : 0;
+        const normalizedContainerId = Number.isFinite(cid) ? cid : 0;
+        container = win.gZenWorkspaces?.getEssentialsSection?.(normalizedContainerId);
       } else if (containerId.startsWith("folder:")) {
         const folderId = containerId.replace("folder:", "");
-        // Use folderMap first (more reliable), fallback to getElementById
+        // Use folderMap first (more reliable), fallback to getElementById.
         container = folderMap.get(folderId) || win.document.getElementById(folderId);
         isFolder = true;
         if (!container) {
           logger.warn(`Folder ${folderId} not found for tab positioning`);
         }
-      } else {
-        const wsId = containerId.replace("workspace:", "");
-        const wsElem = win.gZenWorkspaces.workspaceElement(wsId);
-        container = wsElem?.pinnedTabsContainer || win.gZenWorkspaces.pinnedTabsContainer;
       }
 
       if (!container) {
         continue;
       }
 
-      // Collect tab elements in correct order
+      // Collect tab elements in correct order.
       const orderedTabs = [];
       for (const remote of tabs) {
         const tab = localById.get(remote.id);
@@ -1096,28 +2194,27 @@ SidebarSyncStore.prototype = {
         continue;
       }
 
-      // For folders, add all tabs to the folder first
+      // For folders, add all tabs to the folder first.
       if (isFolder && container.addTabs) {
-        // Filter to tabs not already in this folder
+        // Filter to tabs not already in this folder.
         const tabsToAdd = orderedTabs.filter((tab) => tab.group !== container);
         if (tabsToAdd.length) {
           container.addTabs(tabsToAdd);
         }
       }
 
-      // Now position all tabs in order
-      // Find insert point (after empty tab for folders, or at start)
+      // Find insert point (after empty tab for folders, or at start).
       let insertPoint = null;
       let positionContainer = container;
 
       if (isFolder) {
-        // For folders, tabs are inside groupContainer
+        // For folders, tabs are inside groupContainer.
         positionContainer = container.groupContainer;
         const emptyTab = container.tabs?.find((t) => t.hasAttribute("zen-empty-tab"));
         insertPoint = emptyTab || null;
       }
 
-      // Position first tab
+      // Position first tab.
       const firstTab = orderedTabs[0];
       if (insertPoint) {
         insertPoint.after(firstTab);
@@ -1125,7 +2222,7 @@ SidebarSyncStore.prototype = {
         positionContainer.insertBefore(firstTab, positionContainer.firstChild);
       }
 
-      // Position subsequent tabs after the previous one
+      // Position subsequent tabs after the previous one.
       for (let i = 1; i < orderedTabs.length; i++) {
         const tab = orderedTabs[i];
         const prevTab = orderedTabs[i - 1];
@@ -1152,7 +2249,7 @@ SidebarSyncStore.prototype = {
     let record = new SidebarSyncRec(collection, id);
 
     if (id === lazy.SIDEBAR_SYNC_GUID) {
-      const data = this.collectSyncData();
+      const data = await this.collectSyncData();
       if (data && data.workspaces.length) {
         record.value = data;
       } else {
