@@ -252,13 +252,14 @@ index 0eaca7a58e0026237b71b2ad515efe84d9e8c779..2ab8633d0378e5a25cf75c50b29d4689
                focusUrlBar: true,
              });
              resolve(this.selectedBrowser);
-@@ -2938,6 +3021,9 @@
+@@ -2938,6 +3021,10 @@
          schemelessInput,
          hasValidUserGestureActivation = false,
          textDirectiveUserActivation = false,
 +        _forZenEmptyTab,
 +        essential,
 +        zenWorkspaceId,
++        zenForcedSyncId,
        } = {}
      ) {
        // all callers of addTab that pass a params object need to pass
@@ -288,7 +289,7 @@ index 0eaca7a58e0026237b71b2ad515efe84d9e8c779..2ab8633d0378e5a25cf75c50b29d4689
  
        // Find the tab that opened this one, if any. This is used for
        // determining positioning, and inherited attributes such as the
-@@ -3011,6 +3105,22 @@
+@@ -3011,6 +3105,25 @@
            noInitialLabel,
            skipBackgroundNotify,
          });
@@ -308,7 +309,10 @@ index 0eaca7a58e0026237b71b2ad515efe84d9e8c779..2ab8633d0378e5a25cf75c50b29d4689
 +        if (essential) {
 +          t.setAttribute("zen-essential", "true");
 +        }
-         if (insertTab) {
++        if (typeof zenForcedSyncId === "string" && zenForcedSyncId) {
++          t._zenForcedSyncId = zenForcedSyncId;
++        }
+          if (insertTab) {
            // Insert the tab into the tab container in the correct position.
            this.#insertTabAtIndex(t, {
 @@ -3019,6 +3129,7 @@
