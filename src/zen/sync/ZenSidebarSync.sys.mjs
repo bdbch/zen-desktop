@@ -266,6 +266,43 @@ export const __testOnly = {
   },
 };
 
+function getSidebarSyncStoreForUI() {
+  try {
+    const weaveService = Cc["@mozilla.org/weave/service;1"].getService(
+      Ci.nsISupports
+    ).wrappedJSObject;
+    const engine = weaveService?.engineManager?.get?.("SidebarSync");
+    const store = engine?._store;
+    if (
+      store &&
+      typeof store.restoreFromLastGoodSnapshot === "function" &&
+      typeof store.resumeSyncWithRestoredState === "function"
+    ) {
+      return store;
+    }
+  } catch {
+    // Best effort only.
+  }
+
+  return null;
+}
+
+export async function restoreFromLastGoodSnapshot() {
+  const store = getSidebarSyncStoreForUI();
+  if (!store) {
+    return { ok: false, reason: "store-unavailable" };
+  }
+  return store.restoreFromLastGoodSnapshot();
+}
+
+export async function resumeSyncWithRestoredState() {
+  const store = getSidebarSyncStoreForUI();
+  if (!store) {
+    return { ok: false, reason: "store-unavailable" };
+  }
+  return store.resumeSyncWithRestoredState();
+}
+
 // ============== RECORD ==============
 
 export function SidebarSyncRec(collection, id) {
@@ -1123,6 +1160,211 @@ SidebarSyncStore.prototype = {
     );
     const normalizedIndex = Number.isInteger(index) && index >= 0 ? index : 0;
     return this._cloneRecoverySnapshot(preApplyNewestFirst[normalizedIndex] || null);
+  },
+
+  _getLocalWorkspaceIdsForRestore() {
+    try {
+      const { ZenSessionStore } = ChromeUtils.importESModule(
+        "resource:///modules/zen/ZenSessionManager.sys.mjs"
+      );
+      const workspaces = ZenSessionStore.getClonedSpaces() || [];
+      return this._normalizeKnownIdList(workspaces.map((workspace) => workspace?.uuid));
+    } catch {
+      return [];
+    }
+  },
+
+  _getLocalFolderIdsForRestore(win) {
+    if (!win?.document) {
+      return [];
+    }
+
+    const ids = [];
+    for (const folder of win.document.querySelectorAll("zen-folder")) {
+      ids.push(folder?.id);
+    }
+    return this._normalizeKnownIdList(ids);
+  },
+
+  _getLocalTabIdsForRestore(win) {
+    if (!win?.gBrowser?.tabs) {
+      return [];
+    }
+
+    const ids = [];
+    for (const tab of win.gBrowser.tabs) {
+      if (!tab?.id || tab.hasAttribute("zen-empty-tab")) {
+        continue;
+      }
+      if (tab.pinned || tab.hasAttribute("zen-essential") || tab.group?.isZenFolder) {
+        ids.push(tab.id);
+      }
+    }
+    return this._normalizeKnownIdList(ids);
+  },
+
+  _buildRecoveryRestorePolicies(win) {
+    return {
+      workspaces: {
+        allowDeletion: true,
+        knownSource: KNOWN_REMOTE_SOURCE_REMOTE,
+        knownIds: this._getLocalWorkspaceIdsForRestore(),
+      },
+      folders: {
+        allowDeletion: true,
+        knownSource: KNOWN_REMOTE_SOURCE_REMOTE,
+        knownIds: this._getLocalFolderIdsForRestore(win),
+      },
+      tabs: {
+        allowDeletion: true,
+        knownSource: KNOWN_REMOTE_SOURCE_REMOTE,
+        knownIds: this._getLocalTabIdsForRestore(win),
+      },
+    };
+  },
+
+  async _applyRecoverySnapshotLocally(snapshot, win) {
+    const normalizedSnapshot = this._sanitizeRecoverySnapshotPayload(snapshot);
+    if (!normalizedSnapshot) {
+      return false;
+    }
+
+    const restoreData = {
+      workspaces: normalizedSnapshot.workspaces,
+      folders: normalizedSnapshot.folders,
+      tabs: normalizedSnapshot.tabs,
+    };
+
+    const restorePolicies = this._buildRecoveryRestorePolicies(win);
+
+    isApplyingRemoteData = true;
+    const tracker = this.engine?._tracker;
+    const wasIgnoring = tracker?.ignoreAll;
+    if (tracker) {
+      tracker.ignoreAll = true;
+    }
+
+    try {
+      const workspacesApplied =
+        (await this.applyWorkspaces(restoreData.workspaces, win, restorePolicies.workspaces)) !==
+        false;
+
+      let folderMap = new Map();
+      let remoteFoldersForLayout = restoreData.folders;
+      let foldersApplied = true;
+      const folderResult = await this.applyFolders(
+        restoreData.folders,
+        win,
+        restorePolicies.folders
+      );
+      if (folderResult instanceof Map) {
+        folderMap = folderResult;
+      } else if (folderResult === false) {
+        foldersApplied = false;
+      } else if (folderResult && typeof folderResult === "object") {
+        if (folderResult.folderMap instanceof Map) {
+          folderMap = folderResult.folderMap;
+        }
+        if (Array.isArray(folderResult.remoteFolders)) {
+          remoteFoldersForLayout = folderResult.remoteFolders;
+        }
+        foldersApplied = folderResult.success !== false;
+      }
+
+      let tabMap = new Map();
+      let tabsApplied = true;
+      const tabResult = await this.applyTabs(
+        restoreData.tabs,
+        win,
+        restorePolicies.tabs,
+        folderMap
+      );
+      if (tabResult instanceof Map) {
+        tabMap = tabResult;
+      } else if (tabResult === false) {
+        tabsApplied = false;
+      } else if (tabResult && typeof tabResult === "object") {
+        if (tabResult.tabMap instanceof Map) {
+          tabMap = tabResult.tabMap;
+        }
+        tabsApplied = tabResult.success !== false;
+      }
+
+      const hasLayoutMaps = folderMap.size > 0 || tabMap.size > 0;
+      if ((foldersApplied || tabsApplied) && hasLayoutMaps) {
+        const layoutRemoteData = {
+          ...restoreData,
+          folders: remoteFoldersForLayout,
+        };
+
+        await this.positionMixedTopLevelItems(layoutRemoteData, win, folderMap, tabMap, {
+          includeFolders: foldersApplied,
+          includeTabs: tabsApplied,
+        });
+
+        this.positionMixedNestedFolderItems(layoutRemoteData, win, folderMap, tabMap, {
+          includeFolders: foldersApplied,
+          includeTabs: tabsApplied,
+        });
+      }
+
+      return workspacesApplied && foldersApplied && tabsApplied;
+    } catch (error) {
+      logger.error(`Recovery snapshot apply failed: ${error?.message || error}`);
+      console.error(error);
+      return false;
+    } finally {
+      isApplyingRemoteData = false;
+      if (tracker) {
+        tracker.ignoreAll = wasIgnoring;
+      }
+    }
+  },
+
+  async restoreFromLastGoodSnapshot() {
+    const snapshot = await this.getRecoverySnapshotPayload("preApplyLocal", 0);
+    if (!snapshot) {
+      logGating("recovery: restore requested but no pre-apply snapshot is available");
+      return { ok: false, reason: "no-snapshot" };
+    }
+
+    const win = await getEligibleSyncWindow({ timeoutMs: APPLY_READY_TIMEOUT_MS });
+    if (!win) {
+      logGating("recovery: restore requested but no eligible window is available");
+      return { ok: false, reason: "no-window" };
+    }
+
+    const applied = await this._applyRecoverySnapshotLocally(snapshot, win);
+    if (!applied) {
+      return { ok: false, reason: "apply-failed" };
+    }
+
+    Services.prefs.setBoolPref(PREF_ENGINE_ENABLED, false);
+
+    return {
+      ok: true,
+      paused: true,
+      counts: {
+        workspaces: Array.isArray(snapshot.workspaces) ? snapshot.workspaces.length : 0,
+        folders: Array.isArray(snapshot.folders) ? snapshot.folders.length : 0,
+        tabs: Array.isArray(snapshot.tabs) ? snapshot.tabs.length : 0,
+      },
+    };
+  },
+
+  async resumeSyncWithRestoredState() {
+    Svc.PrefBranch.setBoolPref(PREF_RESTORE_SKIP_INCOMING_ONCE, true);
+    Svc.PrefBranch.setBoolPref(PREF_ENGINE_MODIFIED, true);
+    Services.prefs.setBoolPref(PREF_ENGINE_ENABLED, true);
+
+    logGating("recovery: resumed sync with restored state (skip incoming once + force upload)");
+
+    return {
+      ok: true,
+      armedSkipIncomingOnce: true,
+      markedModified: true,
+      enabled: true,
+    };
   },
 
   armRestoreSkipIncomingOnce() {

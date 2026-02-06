@@ -1,0 +1,152 @@
+diff --git a/browser/components/preferences/sync.js b/browser/components/preferences/sync.js
+index 74bac9130316c03f7f33116ec930503193f60327..302040fc8cbac2a96d4fd9f43f7708c2c430f6f5 100644
+--- a/browser/components/preferences/sync.js
++++ b/browser/components/preferences/sync.js
+@@ -26,10 +26,15 @@ const SYNC_CONNECTED = 1;
+ const BACKUP_ARCHIVE_ENABLED_PREF_NAME = "browser.backup.archive.enabled";
+ const BACKUP_RESTORE_ENABLED_PREF_NAME = "browser.backup.restore.enabled";
+ 
++const SIDEBAR_SYNC_ENGINE_PREF = "services.sync.engine.sidebarsync";
++
+ ChromeUtils.defineESModuleGetters(lazy, {
+   BackupService: "resource:///modules/backup/BackupService.sys.mjs",
++  restoreFromLastGoodSnapshot: "resource:///modules/zen/ZenSidebarSync.sys.mjs",
++  resumeSyncWithRestoredState: "resource:///modules/zen/ZenSidebarSync.sys.mjs",
+ });
+ 
+ var gSyncPane = {
+@@ -298,6 +303,12 @@ var gSyncPane = {
+     setEventListener("syncChangeOptions", "command", function () {
+       this._chooseWhatToSync(true, "manageSyncSettings");
+     });
++    setEventListener("syncSidebarSyncRestoreState", "command", function () {
++      this.restoreSidebarStateFromRecovery();
++    });
++    setEventListener("syncSidebarSyncResumeState", "command", function () {
++      this.resumeSidebarSyncFromRecovery();
++    });
+     setEventListener("syncNow", "command", function () {
+       // syncing can take a little time to send the "started" notification, so
+       // pretend we already got it.
+@@ -316,8 +327,80 @@ var gSyncPane = {
+       document
+         .getElementById("syncNow")
+         .setAttribute("tooltiptext", tooltiptext);
+     });
++
++    let updateSidebarSyncRecoveryUI = () => {
++      this.updateSidebarSyncRecoveryUI();
++    };
++    updateSidebarSyncRecoveryUI();
++    Services.prefs.addObserver(
++      SIDEBAR_SYNC_ENGINE_PREF,
++      updateSidebarSyncRecoveryUI
++    );
++    window.addEventListener("unload", () => {
++      Services.prefs.removeObserver(
++        SIDEBAR_SYNC_ENGINE_PREF,
++        updateSidebarSyncRecoveryUI
++      );
++    });
+   },
+ 
++  updateSidebarSyncRecoveryUI() {
++    let resumeButton = document.getElementById("syncSidebarSyncResumeState");
++    if (!resumeButton) {
++      return;
++    }
++
++    resumeButton.hidden = Services.prefs.getBoolPref(
++      SIDEBAR_SYNC_ENGINE_PREF,
++      true
++    );
++  },
++
++  async _formatSidebarSyncRecoveryStrings(stringIds) {
++    return document.l10n.formatValues(stringIds.map(id => ({ id })));
++  },
++
++  async restoreSidebarStateFromRecovery() {
++    const [confirmTitle, confirmMessage] =
++      await this._formatSidebarSyncRecoveryStrings([
++        "sync-sidebarsync-recovery-confirm-title",
++        "sync-sidebarsync-recovery-confirm-message",
++      ]);
++
++    if (!Services.prompt.confirm(window, confirmTitle, confirmMessage)) {
++      return;
++    }
++
++    const [
++      completedTitle,
++      completedMessage,
++      noSnapshotTitle,
++      noSnapshotMessage,
++      errorTitle,
++      errorMessage,
++    ] = await this._formatSidebarSyncRecoveryStrings([
++        "sync-sidebarsync-recovery-complete-title",
++        "sync-sidebarsync-recovery-complete-message",
++        "sync-sidebarsync-recovery-no-snapshot-title",
++        "sync-sidebarsync-recovery-no-snapshot-message",
++        "sync-sidebarsync-recovery-error-title",
++        "sync-sidebarsync-recovery-error-message",
++      ]);
++
++    try {
++      const result = await lazy.restoreFromLastGoodSnapshot();
++      if (result?.ok) {
++        Services.prompt.alert(window, completedTitle, completedMessage);
++      } else if (result?.reason === "no-snapshot") {
++        Services.prompt.alert(window, noSnapshotTitle, noSnapshotMessage);
++      } else {
++        Services.prompt.alert(window, errorTitle, errorMessage);
++      }
++    } catch (error) {
++      console.error("Failed to restore sidebar state", error);
++      Services.prompt.alert(window, errorTitle, errorMessage);
++    }
++
++    this.updateSidebarSyncRecoveryUI();
++  },
++
++  async resumeSidebarSyncFromRecovery() {
++    const [completedTitle, completedMessage, errorTitle, errorMessage] =
++      await this._formatSidebarSyncRecoveryStrings([
++        "sync-sidebarsync-recovery-resume-complete-title",
++        "sync-sidebarsync-recovery-resume-complete-message",
++        "sync-sidebarsync-recovery-error-title",
++        "sync-sidebarsync-recovery-error-message",
++      ]);
++
++    try {
++      const result = await lazy.resumeSyncWithRestoredState();
++      if (!result?.ok) {
++        Services.prompt.alert(window, errorTitle, errorMessage);
++        return;
++      }
++
++      Services.prompt.alert(window, completedTitle, completedMessage);
++      Services.tm.dispatchToMainThread(() => {
++        Weave.Service.queueSync("sidebarsync-recovery-resume");
++      });
++    } catch (error) {
++      console.error("Failed to resume SidebarSync after restore", error);
++      Services.prompt.alert(window, errorTitle, errorMessage);
++    }
++
++    this.updateSidebarSyncRecoveryUI();
++  },
++
+   updateSyncUI() {
+     const state = UIState.get();
+     const isSyncEnabled = state.syncEnabled;
+@@ -339,6 +422,8 @@ var gSyncPane = {
+       syncConfiguredEl.hidden = true;
+       syncNotConfiguredEl.hidden = false;
+     }
++
++    this.updateSidebarSyncRecoveryUI();
+   },
+ 
+   async _chooseWhatToSync(isSyncConfigured, why = null) {

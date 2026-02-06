@@ -2,10 +2,10 @@ diff --git a/browser/components/preferences/sync.inc.xhtml b/browser/components/
 index 4ecdbdb129577165ed0df619577327f7610e138f..761a4d4f26a21ba555b7af180e8a6030615db500 100644
 --- a/browser/components/preferences/sync.inc.xhtml
 +++ b/browser/components/preferences/sync.inc.xhtml
-@@ -223,6 +223,26 @@
-                     <image class="sync-engine-image sync-engine-prefs" alt=""/>
-                     <label data-l10n-id="sync-currently-syncing-settings"/>
-                   </html:div>
+@@ -223,6 +223,47 @@
+                      <image class="sync-engine-image sync-engine-prefs" alt=""/>
+                      <label data-l10n-id="sync-currently-syncing-settings"/>
+                    </html:div>
 +                  <html:div engine_preference="services.sync.engine.sidebarsync">
 +                    <image class="sync-engine-image sync-engine-workspaces" alt=""/>
 +                    <vbox>
@@ -23,9 +23,30 @@ index 4ecdbdb129577165ed0df619577327f7610e138f..761a4d4f26a21ba555b7af180e8a6030
 +                          class="description-deemphasized"
 +                          data-l10n-id="sync-engine-workspaces-warning"
 +                        />
++                        <description
++                          class="description-deemphasized"
++                          data-l10n-id="sync-engine-workspaces-difference"
++                        />
 +                      </html:details>
 +                    </vbox>
 +                  </html:div>
-                 </html:div>
-                 <hbox>
-                   <button id="syncChangeOptions"
+                  </html:div>
++                <vbox class="sync-sidebarsync-recovery-section">
++                  <label data-l10n-id="sync-sidebarsync-recovery-title"/>
++                  <description
++                    class="description-deemphasized"
++                    data-l10n-id="sync-sidebarsync-recovery-description"
++                  />
++                  <hbox>
++                    <button id="syncSidebarSyncRestoreState"
++                            is="highlightable-button"
++                            class="needs-account-ready"
++                            data-l10n-id="sync-sidebarsync-recovery-restore-button"/>
++                    <button id="syncSidebarSyncResumeState"
++                            is="highlightable-button"
++                            class="needs-account-ready"
++                            data-l10n-id="sync-sidebarsync-recovery-resume-button"/>
++                  </hbox>
++                </vbox>
+                  <hbox>
+                    <button id="syncChangeOptions"
