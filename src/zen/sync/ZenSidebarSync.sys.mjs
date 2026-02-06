@@ -1681,14 +1681,33 @@ SidebarSyncStore.prototype = {
       // CREATE or UPDATE tabs
       for (const remote of validRemote) {
         let tab = localById.get(remote.id);
+        let matchedByUrl = false;
 
         // URL fallback match
         if (!tab) {
           for (const t of win.gBrowser.tabs) {
             if (t.linkedBrowser?.currentURI?.spec === remote.url && !localById.has(t.id)) {
               tab = t;
+              matchedByUrl = true;
               break;
             }
+          }
+        }
+
+        if (tab && matchedByUrl) {
+          const existingWithRemoteId = win.document.getElementById(remote.id);
+          if (!existingWithRemoteId || existingWithRemoteId === tab) {
+            const previousId = tab.id;
+            if (previousId !== remote.id) {
+              tab.id = remote.id;
+              if (this._isNonEmptyString(previousId) && previousId !== remote.id) {
+                localById.delete(previousId);
+              }
+            }
+            logGating(`tabs: url fallback matched id=${remote.id}, reusing local tab`);
+          } else {
+            logGating(`tabs: url fallback collision id=${remote.id}, creating new tab`);
+            tab = null;
           }
         }
 
@@ -1766,18 +1785,20 @@ SidebarSyncStore.prototype = {
       pinned: true,
       triggeringPrincipal: Services.scriptSecurityManager.getSystemPrincipal(),
       createLazyBrowser: true,
+      zenForcedSyncId: remote.id,
+      zenWorkspaceId: remote.workspaceId,
+      essential: remote.isEssential,
     };
 
-    // Set workspace for the tab if not essential
-    if (!remote.isEssential && remote.workspaceId) {
-      options.workspaceId = remote.workspaceId;
-    }
-
     const tab = win.gBrowser.addTab(remote.url, options);
-    win.gBrowser.pinTab(tab);
 
-    // Set the ID to match remote
-    tab.id = remote.id;
+    const isWindowSyncEnabled = Services.prefs.getBoolPref("zen.window-sync.enabled", false);
+    if (!isWindowSyncEnabled && this._isNonEmptyString(remote.id)) {
+      const existingWithRemoteId = win.document.getElementById(remote.id);
+      if (!existingWithRemoteId || existingWithRemoteId === tab) {
+        tab.id = remote.id;
+      }
+    }
 
     // Apply other properties
     this.applyTab(remote, tab, win);
@@ -1789,23 +1810,41 @@ SidebarSyncStore.prototype = {
    * Apply remote data to an existing tab.
    */
   applyTab(remote, tab, win) {
+    if (!tab.pinned) {
+      win.gBrowser.pinTab(tab);
+    }
+
     // Essential state
     if (remote.isEssential) {
       tab.setAttribute("zen-essential", "true");
       tab.removeAttribute("zen-workspace-id");
     } else {
       tab.removeAttribute("zen-essential");
-      if (remote.workspaceId) {
+      if (this._isNonEmptyString(remote.workspaceId)) {
         tab.setAttribute("zen-workspace-id", remote.workspaceId);
+      } else {
+        tab.removeAttribute("zen-workspace-id");
       }
     }
 
     // Label
-    if (remote.label) {
+    if (this._isNonEmptyString(remote.label)) {
       tab._zenChangeLabelFlag = true;
-      tab.zenStaticLabel = remote.label;
-      win.gBrowser._setTabLabel(tab, remote.label);
-      delete tab._zenChangeLabelFlag;
+      try {
+        tab.zenStaticLabel = remote.label;
+        win.gBrowser._setTabLabel(tab, remote.label);
+      } finally {
+        delete tab._zenChangeLabelFlag;
+      }
+    }
+
+    // Icon
+    if (this._isNonEmptyString(remote.icon)) {
+      tab.zenStaticIcon = remote.icon;
+      tab.setAttribute("image", remote.icon);
+      if (remote.isEssential) {
+        win.gZenPinnedTabManager?.setEssentialTabIcon?.(tab, remote.icon);
+      }
     }
   },
 
