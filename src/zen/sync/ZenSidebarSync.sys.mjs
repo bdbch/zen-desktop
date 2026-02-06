@@ -292,7 +292,9 @@ SidebarSyncEngine.prototype = {
       return changedIDs;
     }
 
-    if (!this._tracker.modified) {
+    const trackerModified = !!this._tracker?.modified;
+    const forceBootstrapUpload = Svc.PrefBranch.getBoolPref(PREF_BOOTSTRAP_FORCE_UPLOAD, false);
+    if (!trackerModified && !forceBootstrapUpload) {
       return changedIDs;
     }
 
@@ -301,6 +303,10 @@ SidebarSyncEngine.prototype = {
     if (!win) {
       logGating("getChangedIDs: deferring upload (no eligible ready window)");
       return changedIDs;
+    }
+
+    if (forceBootstrapUpload && !trackerModified) {
+      logGating("getChangedIDs: scheduling bootstrap force-upload");
     }
 
     changedIDs[lazy.SIDEBAR_SYNC_GUID] = 0;
@@ -739,6 +745,82 @@ SidebarSyncStore.prototype = {
     return "deletion-not-authorized";
   },
 
+  _classifyBootstrapScenario(localCounts = {}, remoteCounts = {}, knownRemoteIds = null) {
+    const normalizedLocal = {
+      workspaces: this._normalizeFiniteNumber(localCounts.workspaces, 0),
+      folders: this._normalizeFiniteNumber(localCounts.folders, 0),
+      tabs: this._normalizeFiniteNumber(localCounts.tabs, 0),
+    };
+    const normalizedRemote = {
+      workspaces: this._normalizeFiniteNumber(remoteCounts.workspaces, 0),
+      folders: this._normalizeFiniteNumber(remoteCounts.folders, 0),
+      tabs: this._normalizeFiniteNumber(remoteCounts.tabs, 0),
+    };
+
+    const localTotal = normalizedLocal.workspaces + normalizedLocal.folders + normalizedLocal.tabs;
+    const remoteTotal =
+      normalizedRemote.workspaces + normalizedRemote.folders + normalizedRemote.tabs;
+
+    const knownSource =
+      knownRemoteIds?.source === KNOWN_REMOTE_SOURCE_REMOTE
+        ? KNOWN_REMOTE_SOURCE_REMOTE
+        : KNOWN_REMOTE_SOURCE_LEGACY;
+
+    if (localTotal === 0 && remoteTotal === 0) {
+      return {
+        id: "local-empty_remote-empty",
+        knownSource,
+        local: normalizedLocal,
+        remote: normalizedRemote,
+      };
+    }
+
+    if (localTotal > 0 && remoteTotal === 0) {
+      return {
+        id: "local-non-empty_remote-empty",
+        knownSource,
+        local: normalizedLocal,
+        remote: normalizedRemote,
+      };
+    }
+
+    if (localTotal === 0 && remoteTotal > 0) {
+      return {
+        id: "local-empty_remote-non-empty",
+        knownSource,
+        local: normalizedLocal,
+        remote: normalizedRemote,
+      };
+    }
+
+    const totalDelta = Math.abs(localTotal - remoteTotal);
+    const totalMax = Math.max(localTotal, remoteTotal, 1);
+    const roughlyEqual = totalDelta / totalMax <= 0.25;
+
+    return {
+      id: roughlyEqual
+        ? "local-non-empty_remote-non-empty-roughly-equal"
+        : "local-non-empty_remote-non-empty-divergent",
+      knownSource,
+      local: normalizedLocal,
+      remote: normalizedRemote,
+    };
+  },
+
+  _markBootstrapComplete() {
+    Svc.PrefBranch.setBoolPref(PREF_BOOTSTRAP_COMPLETE, true);
+    this._setBootstrapForceUpload(false);
+  },
+
+  _setBootstrapForceUpload(forceUpload) {
+    const shouldForceUpload = !!forceUpload;
+    Svc.PrefBranch.setBoolPref(PREF_BOOTSTRAP_FORCE_UPLOAD, shouldForceUpload);
+
+    if (shouldForceUpload) {
+      Svc.PrefBranch.setBoolPref(PREF_ENGINE_MODIFIED, true);
+    }
+  },
+
   // ==========================================
   // MAIN SYNC METHODS
   // ==========================================
@@ -768,6 +850,17 @@ SidebarSyncStore.prototype = {
       folders: this.syncFolders(win, now),
       tabs: this.syncTabs(win, now),
     };
+
+    const hasData = data.workspaces.length > 0 || data.folders.length > 0 || data.tabs.length > 0;
+    const forceBootstrapUpload = Svc.PrefBranch.getBoolPref(PREF_BOOTSTRAP_FORCE_UPLOAD, false);
+    if (forceBootstrapUpload && hasData) {
+      if (typeof this._setBootstrapForceUpload === "function") {
+        this._setBootstrapForceUpload(false);
+      } else {
+        Svc.PrefBranch.setBoolPref(PREF_BOOTSTRAP_FORCE_UPLOAD, false);
+      }
+      logGating("collectSyncData: consumed bootstrap force-upload");
+    }
 
     logger.info(
       `Upload: ${data.workspaces.length} workspaces, ${data.folders.length} folders, ${data.tabs.length} tabs`
@@ -839,31 +932,56 @@ SidebarSyncStore.prototype = {
       tabs: tabValidation.valid,
     };
 
+    const remoteCounts = {
+      workspaces: validRemoteData.workspaces.length,
+      folders: validRemoteData.folders.length,
+      tabs: validRemoteData.tabs.length,
+    };
+
     const localCounts = {
       workspaces: this._getLocalWorkspaceCount(),
       folders: this._getLocalFolderCount(win),
       tabs: this._getLocalSidebarTabCount(win),
     };
 
+    const bootstrapComplete = Svc.PrefBranch.getBoolPref(PREF_BOOTSTRAP_COMPLETE, false);
+    const bootstrapScenario = bootstrapComplete
+      ? null
+      : this._classifyBootstrapScenario(localCounts, remoteCounts, knownRemoteIds);
+
+    if (bootstrapScenario) {
+      logger.info(
+        `Bootstrap scenario: ${bootstrapScenario.id} ` +
+          `(known=${bootstrapScenario.knownSource}, ` +
+          `local=${localCounts.workspaces}/${localCounts.folders}/${localCounts.tabs}, ` +
+          `remote=${remoteCounts.workspaces}/${remoteCounts.folders}/${remoteCounts.tabs})`
+      );
+
+      if (bootstrapScenario.id === "local-empty_remote-empty") {
+        this._markBootstrapComplete();
+        return;
+      }
+
+      if (bootstrapScenario.id === "local-non-empty_remote-empty") {
+        this._setBootstrapForceUpload(true);
+        return;
+      }
+    }
+
     const applyPolicies = {
       workspaces: this._buildTypeApplyPolicy(
         "workspaces",
         knownRemoteIds,
         localCounts.workspaces,
-        validRemoteData.workspaces.length
+        remoteCounts.workspaces
       ),
       folders: this._buildTypeApplyPolicy(
         "folders",
         knownRemoteIds,
         localCounts.folders,
-        validRemoteData.folders.length
+        remoteCounts.folders
       ),
-      tabs: this._buildTypeApplyPolicy(
-        "tabs",
-        knownRemoteIds,
-        localCounts.tabs,
-        validRemoteData.tabs.length
-      ),
+      tabs: this._buildTypeApplyPolicy("tabs", knownRemoteIds, localCounts.tabs, remoteCounts.tabs),
     };
 
     if (workspaceValidation.skippedByInvalidCutoff) {
@@ -1006,6 +1124,31 @@ SidebarSyncStore.prototype = {
         });
       } else {
         logDeletionGuard("knownRemoteIds: skipping update (no types eligible)");
+      }
+
+      if (bootstrapScenario) {
+        const bootstrapApplySucceeded =
+          (remoteCounts.workspaces === 0 || workspacesApplied) &&
+          (remoteCounts.folders === 0 || foldersApplied) &&
+          (remoteCounts.tabs === 0 || tabsApplied);
+
+        if (bootstrapApplySucceeded) {
+          if (
+            bootstrapScenario.id === "local-empty_remote-non-empty" ||
+            bootstrapScenario.id === "local-non-empty_remote-non-empty-roughly-equal" ||
+            bootstrapScenario.id === "local-non-empty_remote-non-empty-divergent"
+          ) {
+            this._markBootstrapComplete();
+          }
+
+          if (
+            bootstrapScenario.id === "local-non-empty_remote-non-empty-roughly-equal" ||
+            bootstrapScenario.id === "local-non-empty_remote-non-empty-divergent"
+          ) {
+            Svc.PrefBranch.setBoolPref(PREF_ENGINE_MODIFIED, true);
+            logGating("bootstrap: scheduled convergence upload after merge");
+          }
+        }
       }
     } catch (e) {
       logger.error(`Failed to apply remote data: ${e.message}`);

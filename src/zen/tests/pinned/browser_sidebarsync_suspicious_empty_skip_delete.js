@@ -4,6 +4,9 @@
 "use strict";
 
 const PREF_KNOWN_REMOTE_IDS = "services.sync.engine.sidebarsync.knownRemoteIds";
+const PREF_BOOTSTRAP_COMPLETE = "services.sync.engine.sidebarsync.bootstrapComplete";
+const PREF_BOOTSTRAP_FORCE_UPLOAD = "services.sync.engine.sidebarsync.bootstrapForceUpload";
+const PREF_ENGINE_MODIFIED = "services.sync.engine.sidebarsync.modified";
 
 function getSidebarSyncStorePrototype() {
   const { SidebarSyncEngine } = ChromeUtils.importESModule(
@@ -24,11 +27,29 @@ add_task(async function test_suspicious_empty_tabs_and_folders_skip_delete() {
   const previousKnownPref = hadKnownPref
     ? Services.prefs.getStringPref(PREF_KNOWN_REMOTE_IDS)
     : null;
+  const trackedBoolPrefs = [
+    PREF_BOOTSTRAP_COMPLETE,
+    PREF_BOOTSTRAP_FORCE_UPLOAD,
+    PREF_ENGINE_MODIFIED,
+  ].map((pref) => ({
+    pref,
+    hadUserValue: Services.prefs.prefHasUserValue(pref),
+    value: Services.prefs.getBoolPref(pref, false),
+  }));
+
   registerCleanupFunction(() => {
     if (hadKnownPref) {
       Services.prefs.setStringPref(PREF_KNOWN_REMOTE_IDS, previousKnownPref);
     } else {
       Services.prefs.clearUserPref(PREF_KNOWN_REMOTE_IDS);
+    }
+
+    for (const { pref, hadUserValue, value } of trackedBoolPrefs) {
+      if (hadUserValue) {
+        Services.prefs.setBoolPref(pref, value);
+      } else {
+        Services.prefs.clearUserPref(pref);
+      }
     }
   });
 
