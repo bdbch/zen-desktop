@@ -847,13 +847,35 @@ SidebarSyncStore.prototype = {
         }
       }
 
+      let tabMap = new Map();
       let tabsApplied = true;
       if (applyPolicies.tabs.skipApply) {
         tabsApplied = false;
       } else {
-        tabsApplied =
-          (await this.applyTabs(validRemoteData.tabs, win, applyPolicies.tabs, folderMap)) !==
-          false;
+        const tabResult = await this.applyTabs(
+          validRemoteData.tabs,
+          win,
+          applyPolicies.tabs,
+          folderMap
+        );
+        if (tabResult instanceof Map) {
+          tabMap = tabResult;
+        } else if (tabResult === false) {
+          tabsApplied = false;
+        } else if (tabResult && typeof tabResult === "object") {
+          if (tabResult.tabMap instanceof Map) {
+            tabMap = tabResult.tabMap;
+          }
+          tabsApplied = tabResult.success !== false;
+        }
+      }
+
+      const hasLayoutMaps = folderMap.size > 0 || tabMap.size > 0;
+      if ((foldersApplied || tabsApplied) && hasLayoutMaps) {
+        await this.positionMixedTopLevelItems(validRemoteData, win, folderMap, tabMap, {
+          includeFolders: foldersApplied,
+          includeTabs: tabsApplied,
+        });
       }
 
       const updateTypes = {
@@ -1355,9 +1377,6 @@ SidebarSyncStore.prototype = {
         }
       }
 
-      // Position folders
-      this.positionFolders(validRemote, localById, win);
-
       const parts = [];
       if (changes.created.length) {
         parts.push(`created: ${changes.created.join(", ")}`);
@@ -1577,7 +1596,7 @@ SidebarSyncStore.prototype = {
         }
       }
 
-      // Position tabs (pass folderMap to look up folders directly)
+      // Position non-top-level tabs (folder/essentials only).
       this.positionTabs(validRemote, localById, win, folderMap);
 
       const parts = [];
@@ -1599,11 +1618,11 @@ SidebarSyncStore.prototype = {
 
       // Refresh tab system cache (required after modifying tab structure)
       win.gBrowser.tabContainer._invalidateCachedTabs?.();
-      return true;
+      return { tabMap: localById, success: true };
     } catch (e) {
       logger.error(`Failed to apply tabs: ${e.message}`);
       console.error(e);
-      return false;
+      return { tabMap: new Map(), success: false };
     }
   },
 
@@ -1660,22 +1679,215 @@ SidebarSyncStore.prototype = {
     }
   },
 
+  _compareMixedLayoutItems(a, b) {
+    const byPosition = a.position - b.position;
+    if (byPosition !== 0) {
+      return byPosition;
+    }
+
+    if (a.kind !== b.kind) {
+      return a.kind === "folder" ? -1 : 1;
+    }
+
+    return a.id.localeCompare(b.id);
+  },
+
+  _buildMixedLayout(remoteData, workspaceId, options = {}) {
+    const includeFolders = options.includeFolders !== false;
+    const includeTabs = options.includeTabs !== false;
+    const items = [];
+
+    if (includeFolders) {
+      for (const folder of remoteData.folders || []) {
+        if (folder.workspaceId === workspaceId && folder.parentId == null) {
+          items.push({
+            kind: "folder",
+            id: folder.id,
+            workspaceId,
+            position: this._normalizeFiniteNumber(folder.position, 0),
+          });
+        }
+      }
+    }
+
+    if (includeTabs) {
+      for (const tab of remoteData.tabs || []) {
+        if (!tab.isEssential && tab.workspaceId === workspaceId && tab.folderId == null) {
+          items.push({
+            kind: "tab",
+            id: tab.id,
+            workspaceId,
+            position: this._normalizeFiniteNumber(tab.position, 0),
+          });
+        }
+      }
+    }
+
+    items.sort((a, b) => this._compareMixedLayoutItems(a, b));
+    return items;
+  },
+
+  _ensureWorkspaceItemNode(item, win, remoteById, folderMap, tabMap) {
+    if (item.kind === "folder") {
+      let folder = folderMap.get(item.id) || win.document.getElementById(item.id);
+      if (!folder) {
+        const remoteFolder = remoteById.folders.get(item.id);
+        if (!remoteFolder) {
+          logGating(`mixed-ordering: missing remote folder id=${item.id}`);
+          return null;
+        }
+        folder = this.createFolder(remoteFolder, win, folderMap);
+      }
+      if (folder) {
+        folderMap.set(item.id, folder);
+      }
+      return folder;
+    }
+
+    let tab = tabMap.get(item.id) || win.document.getElementById(item.id);
+    if (!tab) {
+      const remoteTab = remoteById.tabs.get(item.id);
+      if (!remoteTab) {
+        logGating(`mixed-ordering: missing remote tab id=${item.id}`);
+        return null;
+      }
+      tab = this.createTab(remoteTab, win);
+    }
+
+    if (tab) {
+      tabMap.set(item.id, tab);
+    }
+    return tab;
+  },
+
+  async _applyMixedLayoutForWorkspace(win, container, layout, remoteById, folderMap, tabMap) {
+    const separator = container.querySelector(".pinned-tabs-container-separator");
+    const firstReference = separator || null;
+    let previousNode = null;
+
+    for (const item of layout) {
+      const node = this._ensureWorkspaceItemNode(item, win, remoteById, folderMap, tabMap);
+      if (!node) {
+        logGating(`mixed-ordering: skipping unresolved ${item.kind} id=${item.id}`);
+        continue;
+      }
+
+      if (previousNode) {
+        previousNode.after(node);
+      } else {
+        container.insertBefore(node, firstReference);
+      }
+
+      previousNode = node;
+    }
+  },
+
+  async positionMixedTopLevelItems(
+    remoteData,
+    win,
+    folderMap = new Map(),
+    tabMap = new Map(),
+    options = {}
+  ) {
+    const includeFolders = options.includeFolders !== false;
+    const includeTabs = options.includeTabs !== false;
+    const workspaceIds = [];
+    const seenWorkspaceIds = new Set();
+
+    const sortedRemoteWorkspaces = [...(remoteData.workspaces || [])].sort((a, b) =>
+      this._compareMixedLayoutItems(
+        { kind: "folder", id: a.id, position: this._normalizeFiniteNumber(a.position, 0) },
+        { kind: "folder", id: b.id, position: this._normalizeFiniteNumber(b.position, 0) }
+      )
+    );
+
+    for (const workspace of sortedRemoteWorkspaces) {
+      if (!this._isNonEmptyString(workspace.id) || seenWorkspaceIds.has(workspace.id)) {
+        continue;
+      }
+      seenWorkspaceIds.add(workspace.id);
+      workspaceIds.push(workspace.id);
+    }
+
+    if (includeFolders) {
+      for (const folder of remoteData.folders || []) {
+        if (
+          !this._isNonEmptyString(folder.workspaceId) ||
+          seenWorkspaceIds.has(folder.workspaceId)
+        ) {
+          continue;
+        }
+        seenWorkspaceIds.add(folder.workspaceId);
+        workspaceIds.push(folder.workspaceId);
+      }
+    }
+
+    if (includeTabs) {
+      for (const tab of remoteData.tabs || []) {
+        if (
+          tab.isEssential ||
+          tab.folderId != null ||
+          !this._isNonEmptyString(tab.workspaceId) ||
+          seenWorkspaceIds.has(tab.workspaceId)
+        ) {
+          continue;
+        }
+        seenWorkspaceIds.add(tab.workspaceId);
+        workspaceIds.push(tab.workspaceId);
+      }
+    }
+
+    const remoteById = {
+      folders: new Map((remoteData.folders || []).map((folder) => [folder.id, folder])),
+      tabs: new Map((remoteData.tabs || []).map((tab) => [tab.id, tab])),
+    };
+
+    for (const workspaceId of workspaceIds) {
+      const wsElem = win.gZenWorkspaces.workspaceElement(workspaceId);
+      const container = wsElem?.pinnedTabsContainer || win.gZenWorkspaces.pinnedTabsContainer;
+      if (!container) {
+        continue;
+      }
+
+      const layout = this._buildMixedLayout(remoteData, workspaceId, {
+        includeFolders,
+        includeTabs,
+      });
+      if (!layout.length) {
+        continue;
+      }
+
+      await this._applyMixedLayoutForWorkspace(
+        win,
+        container,
+        layout,
+        remoteById,
+        folderMap,
+        tabMap
+      );
+    }
+
+    win.gBrowser.tabContainer._invalidateCachedTabs?.();
+  },
+
   /**
-   * Position all tabs according to remote positions.
-   * This handles moving tabs to correct containers (folders, workspaces, essentials).
+   * Position non-top-level tabs according to remote positions.
+   * This handles moving tabs to folder and essentials containers.
    */
   positionTabs(remoteTabs, localById, win, folderMap = new Map()) {
-    // Group by container
+    // Group by non-top-level container only.
     const byContainer = new Map();
     for (const remote of remoteTabs) {
+      if (!remote.isEssential && !remote.folderId) {
+        continue;
+      }
+
       let key;
       if (remote.isEssential) {
         const cid = Number.isFinite(remote.essentialContainerId) ? remote.essentialContainerId : 0;
         key = `essentials:${cid}`;
-      } else if (remote.folderId) {
-        key = `folder:${remote.folderId}`;
       } else {
-        key = `workspace:${remote.workspaceId || "default"}`;
+        key = `folder:${remote.folderId}`;
       }
 
       if (!byContainer.has(key)) {
@@ -1684,11 +1896,11 @@ SidebarSyncStore.prototype = {
       byContainer.get(key).push(remote);
     }
 
-    // Position each container's tabs
+    // Position each container's tabs.
     for (const [containerId, tabs] of byContainer) {
-      tabs.sort((a, b) => a.position - b.position);
+      tabs.sort((a, b) => a.position - b.position || a.id.localeCompare(b.id));
 
-      // Get container element
+      // Get container element.
       let container;
       let isFolder = false;
       if (containerId === "essentials" || containerId.startsWith("essentials:")) {
@@ -1699,23 +1911,19 @@ SidebarSyncStore.prototype = {
         container = win.gZenWorkspaces?.getEssentialsSection?.(normalizedContainerId);
       } else if (containerId.startsWith("folder:")) {
         const folderId = containerId.replace("folder:", "");
-        // Use folderMap first (more reliable), fallback to getElementById
+        // Use folderMap first (more reliable), fallback to getElementById.
         container = folderMap.get(folderId) || win.document.getElementById(folderId);
         isFolder = true;
         if (!container) {
           logger.warn(`Folder ${folderId} not found for tab positioning`);
         }
-      } else {
-        const wsId = containerId.replace("workspace:", "");
-        const wsElem = win.gZenWorkspaces.workspaceElement(wsId);
-        container = wsElem?.pinnedTabsContainer || win.gZenWorkspaces.pinnedTabsContainer;
       }
 
       if (!container) {
         continue;
       }
 
-      // Collect tab elements in correct order
+      // Collect tab elements in correct order.
       const orderedTabs = [];
       for (const remote of tabs) {
         const tab = localById.get(remote.id);
@@ -1728,28 +1936,27 @@ SidebarSyncStore.prototype = {
         continue;
       }
 
-      // For folders, add all tabs to the folder first
+      // For folders, add all tabs to the folder first.
       if (isFolder && container.addTabs) {
-        // Filter to tabs not already in this folder
+        // Filter to tabs not already in this folder.
         const tabsToAdd = orderedTabs.filter((tab) => tab.group !== container);
         if (tabsToAdd.length) {
           container.addTabs(tabsToAdd);
         }
       }
 
-      // Now position all tabs in order
-      // Find insert point (after empty tab for folders, or at start)
+      // Find insert point (after empty tab for folders, or at start).
       let insertPoint = null;
       let positionContainer = container;
 
       if (isFolder) {
-        // For folders, tabs are inside groupContainer
+        // For folders, tabs are inside groupContainer.
         positionContainer = container.groupContainer;
         const emptyTab = container.tabs?.find((t) => t.hasAttribute("zen-empty-tab"));
         insertPoint = emptyTab || null;
       }
 
-      // Position first tab
+      // Position first tab.
       const firstTab = orderedTabs[0];
       if (insertPoint) {
         insertPoint.after(firstTab);
@@ -1757,7 +1964,7 @@ SidebarSyncStore.prototype = {
         positionContainer.insertBefore(firstTab, positionContainer.firstChild);
       }
 
-      // Position subsequent tabs after the previous one
+      // Position subsequent tabs after the previous one.
       for (let i = 1; i < orderedTabs.length; i++) {
         const tab = orderedTabs[i];
         const prevTab = orderedTabs[i - 1];
