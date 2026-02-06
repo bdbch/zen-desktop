@@ -18,6 +18,9 @@ function getPinnedOrderByIds(container, ids) {
 }
 
 add_setup(async function () {
+  await SpecialPowers.pushPrefEnv({
+    set: [["zen.window-sync.enabled", false]],
+  });
   await gZenWorkspaces.promisePinnedInitialized;
   await gZenWorkspaces.promiseInitialized;
 });
@@ -120,7 +123,7 @@ add_task(async function test_applyRemoteData_mixed_ordering_single_pass() {
     for (const id of [tabIdA, tabIdB]) {
       const tab = document.getElementById(id);
       if (tab && !tab.closing) {
-        gBrowser.removeTab(tab, { animate: false });
+        await BrowserTestUtils.removeTab(tab);
       }
     }
   }

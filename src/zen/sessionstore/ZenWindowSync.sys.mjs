@@ -1137,9 +1137,11 @@ class nsZenWindowSync {
     if (forcedSyncId) {
       tab.id = forcedSyncId;
       delete tab._zenForcedSyncId;
-    } else if (tab.id && !duringPinning) {
-      // This tab was opened as part of a sync operation.
-      return;
+    } else if (tab.id) {
+      if (!duringPinning) {
+        // This tab was opened as part of a sync operation.
+        return;
+      }
     } else {
       tab.id = this.#newTabSyncId;
     }
