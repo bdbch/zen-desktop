@@ -35,6 +35,11 @@ const MIN_KNOWN_FOR_SHRINK_GUARD = 4;
 const SHRINK_RATIO = 0.25;
 const INVALID_CUTOFF_MIN_COUNT = 3;
 const INVALID_CUTOFF_RATIO = 0.2;
+const RECOVERY_FILE_NAME = "zen-sidebarsync-recovery.json";
+const RECOVERY_FILE_VERSION = 1;
+const RECOVERY_MAX_PRE_APPLY_SNAPSHOTS = 2;
+const RECOVERY_MAX_LAST_UPLOADED_SNAPSHOTS = 1;
+const RECOVERY_MAX_SERIALIZED_FILE_SIZE = 3 * 1024 * 1024;
 
 // Module-level flag to prevent tracker from marking changes during apply
 // This is needed because this.engine._tracker may not be accessible from Store
@@ -822,6 +827,320 @@ SidebarSyncStore.prototype = {
   },
 
   // ==========================================
+  // LOCAL RECOVERY SNAPSHOTS
+  // ==========================================
+
+  _getRecoveryFilePath() {
+    return PathUtils.join(PathUtils.profileDir, RECOVERY_FILE_NAME);
+  },
+
+  _createEmptyRecoveryState() {
+    return {
+      version: RECOVERY_FILE_VERSION,
+      updatedAt: 0,
+      preApplyLocal: [],
+      lastUploadedLocal: null,
+    };
+  },
+
+  _sanitizeRecoverySnapshotPayload(payload) {
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+      return null;
+    }
+
+    const rawSchemaVersion = Number.isFinite(payload.schemaVersion)
+      ? payload.schemaVersion
+      : CURRENT_SCHEMA_VERSION;
+    const schemaVersion = Math.max(1, Math.min(rawSchemaVersion, CURRENT_SCHEMA_VERSION));
+
+    const workspaces = this._validateAndNormalizeRemoteType(
+      "workspaces",
+      payload.workspaces,
+      schemaVersion
+    ).valid;
+    const folders = this._validateAndNormalizeRemoteType(
+      "folders",
+      payload.folders,
+      schemaVersion
+    ).valid;
+    const tabs = this._validateAndNormalizeRemoteType("tabs", payload.tabs, schemaVersion).valid;
+
+    return {
+      schemaVersion,
+      workspaces: workspaces.map(({ icon: _icon, ...workspace }) => workspace),
+      folders: folders.map(({ icon: _icon, ...folder }) => folder),
+      tabs: tabs.map(({ icon: _icon, ...tab }) => tab),
+    };
+  },
+
+  _normalizeRecoverySnapshot(rawSnapshot) {
+    if (!rawSnapshot || typeof rawSnapshot !== "object" || Array.isArray(rawSnapshot)) {
+      return null;
+    }
+
+    const sanitizedPayload = this._sanitizeRecoverySnapshotPayload(rawSnapshot);
+    if (!sanitizedPayload) {
+      return null;
+    }
+
+    return {
+      capturedAt: this._normalizeFiniteNumber(rawSnapshot.capturedAt, 0),
+      ...sanitizedPayload,
+    };
+  },
+
+  _normalizeRecoveryState(rawState) {
+    const empty = this._createEmptyRecoveryState();
+    if (!rawState || typeof rawState !== "object" || Array.isArray(rawState)) {
+      return empty;
+    }
+
+    const preApplyLocal = Array.isArray(rawState.preApplyLocal)
+      ? rawState.preApplyLocal
+          .map((snapshot) => this._normalizeRecoverySnapshot(snapshot))
+          .filter(Boolean)
+      : [];
+    preApplyLocal.sort((a, b) => a.capturedAt - b.capturedAt || a.schemaVersion - b.schemaVersion);
+
+    return {
+      version: RECOVERY_FILE_VERSION,
+      updatedAt: this._normalizeFiniteNumber(rawState.updatedAt, 0),
+      preApplyLocal,
+      lastUploadedLocal: this._normalizeRecoverySnapshot(rawState.lastUploadedLocal),
+    };
+  },
+
+  _applyRecoveryRetention(state) {
+    return {
+      version: RECOVERY_FILE_VERSION,
+      updatedAt: this._normalizeFiniteNumber(state.updatedAt, 0),
+      preApplyLocal: Array.isArray(state.preApplyLocal)
+        ? state.preApplyLocal.slice(-RECOVERY_MAX_PRE_APPLY_SNAPSHOTS)
+        : [],
+      lastUploadedLocal:
+        RECOVERY_MAX_LAST_UPLOADED_SNAPSHOTS > 0 ? state.lastUploadedLocal || null : null,
+    };
+  },
+
+  _getSerializedRecoverySize(value) {
+    try {
+      return JSON.stringify(value).length;
+    } catch {
+      return Number.POSITIVE_INFINITY;
+    }
+  },
+
+  _pruneRecoveryStateBySize(state) {
+    const bounded = {
+      version: RECOVERY_FILE_VERSION,
+      updatedAt: this._normalizeFiniteNumber(state.updatedAt, 0),
+      preApplyLocal: Array.isArray(state.preApplyLocal) ? [...state.preApplyLocal] : [],
+      lastUploadedLocal: state.lastUploadedLocal || null,
+    };
+
+    const nextOldestType = () => {
+      const oldestPreApply = bounded.preApplyLocal[0] || null;
+      const uploaded = bounded.lastUploadedLocal;
+
+      if (!oldestPreApply && !uploaded) {
+        return null;
+      }
+      if (!uploaded) {
+        return "preApplyLocal";
+      }
+      if (!oldestPreApply) {
+        return "lastUploadedLocal";
+      }
+
+      const preApplyCapturedAt = this._normalizeFiniteNumber(oldestPreApply.capturedAt, 0);
+      const uploadedCapturedAt = this._normalizeFiniteNumber(uploaded.capturedAt, 0);
+      return preApplyCapturedAt <= uploadedCapturedAt ? "preApplyLocal" : "lastUploadedLocal";
+    };
+
+    while (this._getSerializedRecoverySize(bounded) > RECOVERY_MAX_SERIALIZED_FILE_SIZE) {
+      const oldestType = nextOldestType();
+      if (!oldestType) {
+        break;
+      }
+
+      if (oldestType === "preApplyLocal") {
+        bounded.preApplyLocal.shift();
+      } else {
+        bounded.lastUploadedLocal = null;
+      }
+    }
+
+    if (this._getSerializedRecoverySize(bounded) > RECOVERY_MAX_SERIALIZED_FILE_SIZE) {
+      bounded.preApplyLocal = [];
+      bounded.lastUploadedLocal = null;
+    }
+
+    return bounded;
+  },
+
+  async _readRecoveryState() {
+    try {
+      const raw = await IOUtils.readJSON(this._getRecoveryFilePath());
+      return this._normalizeRecoveryState(raw);
+    } catch (error) {
+      const name = error?.name || "";
+      if (name !== "NotFoundError" && name !== "NotFound") {
+        logGating(`recovery: failed to read snapshots (${error?.message || error})`);
+      }
+      return this._createEmptyRecoveryState();
+    }
+  },
+
+  async _writeRecoveryState(state) {
+    const normalized = this._normalizeRecoveryState(state);
+    const retained = this._applyRecoveryRetention(normalized);
+    const bounded = this._pruneRecoveryStateBySize(retained);
+
+    try {
+      await IOUtils.writeJSON(this._getRecoveryFilePath(), bounded);
+    } catch (error) {
+      logGating(`recovery: failed to write snapshots (${error?.message || error})`);
+    }
+
+    return bounded;
+  },
+
+  async _captureRecoverySnapshot(snapshotType, payload) {
+    const sanitizedPayload = this._sanitizeRecoverySnapshotPayload(payload);
+    if (!sanitizedPayload) {
+      return false;
+    }
+
+    const snapshot = {
+      capturedAt: Date.now(),
+      ...sanitizedPayload,
+    };
+
+    try {
+      const recovery = await this._readRecoveryState();
+      if (snapshotType === "preApplyLocal") {
+        recovery.preApplyLocal.push(snapshot);
+      } else if (snapshotType === "lastUploadedLocal") {
+        recovery.lastUploadedLocal = snapshot;
+      } else {
+        return false;
+      }
+
+      recovery.updatedAt = Date.now();
+      await this._writeRecoveryState(recovery);
+      return true;
+    } catch (error) {
+      logGating(`recovery: failed capturing ${snapshotType} snapshot (${error?.message || error})`);
+      return false;
+    }
+  },
+
+  async _capturePreApplyLocalSnapshot(win) {
+    try {
+      const now = Date.now();
+      const localSnapshot = {
+        schemaVersion: CURRENT_SCHEMA_VERSION,
+        lastModified: now,
+        workspaces: this.syncWorkspaces(win, now),
+        folders: this.syncFolders(win, now),
+        tabs: this.syncTabs(win, now),
+      };
+      await this._captureRecoverySnapshot("preApplyLocal", localSnapshot);
+    } catch (error) {
+      logGating(`recovery: pre-apply snapshot failed (${error?.message || error})`);
+    }
+  },
+
+  async _captureLastUploadedLocalSnapshot(data) {
+    try {
+      await this._captureRecoverySnapshot("lastUploadedLocal", data);
+    } catch (error) {
+      logGating(`recovery: upload snapshot failed (${error?.message || error})`);
+    }
+  },
+
+  _cloneRecoverySnapshot(snapshot) {
+    if (!snapshot) {
+      return null;
+    }
+
+    return {
+      capturedAt: this._normalizeFiniteNumber(snapshot.capturedAt, 0),
+      schemaVersion: this._normalizeFiniteNumber(snapshot.schemaVersion, CURRENT_SCHEMA_VERSION),
+      workspaces: (snapshot.workspaces || []).map((workspace) => ({ ...workspace })),
+      folders: (snapshot.folders || []).map((folder) => ({ ...folder })),
+      tabs: (snapshot.tabs || []).map((tab) => ({ ...tab })),
+    };
+  },
+
+  _toRecoverySnapshotSummary(source, snapshot, index = 0) {
+    if (!snapshot) {
+      return null;
+    }
+
+    return {
+      source,
+      index,
+      capturedAt: this._normalizeFiniteNumber(snapshot.capturedAt, 0),
+      schemaVersion: this._normalizeFiniteNumber(snapshot.schemaVersion, CURRENT_SCHEMA_VERSION),
+      counts: {
+        workspaces: Array.isArray(snapshot.workspaces) ? snapshot.workspaces.length : 0,
+        folders: Array.isArray(snapshot.folders) ? snapshot.folders.length : 0,
+        tabs: Array.isArray(snapshot.tabs) ? snapshot.tabs.length : 0,
+      },
+    };
+  },
+
+  async getRecoverySnapshotInventory() {
+    const recovery = await this._readRecoveryState();
+    const preApplyNewestFirst = [...recovery.preApplyLocal].sort(
+      (a, b) => b.capturedAt - a.capturedAt
+    );
+
+    return {
+      version: recovery.version,
+      updatedAt: recovery.updatedAt,
+      preApplyLocal: preApplyNewestFirst
+        .map((snapshot, index) => this._toRecoverySnapshotSummary("preApplyLocal", snapshot, index))
+        .filter(Boolean),
+      lastUploadedLocal: this._toRecoverySnapshotSummary(
+        "lastUploadedLocal",
+        recovery.lastUploadedLocal,
+        0
+      ),
+    };
+  },
+
+  async getRecoverySnapshotPayload(source = "preApplyLocal", index = 0) {
+    const recovery = await this._readRecoveryState();
+
+    if (source === "lastUploadedLocal") {
+      return this._cloneRecoverySnapshot(recovery.lastUploadedLocal);
+    }
+
+    const preApplyNewestFirst = [...recovery.preApplyLocal].sort(
+      (a, b) => b.capturedAt - a.capturedAt
+    );
+    const normalizedIndex = Number.isInteger(index) && index >= 0 ? index : 0;
+    return this._cloneRecoverySnapshot(preApplyNewestFirst[normalizedIndex] || null);
+  },
+
+  armRestoreSkipIncomingOnce() {
+    Svc.PrefBranch.setBoolPref(PREF_RESTORE_SKIP_INCOMING_ONCE, true);
+  },
+
+  _consumeRestoreSkipIncomingOnce() {
+    const skipIncomingOnce = Svc.PrefBranch.getBoolPref(PREF_RESTORE_SKIP_INCOMING_ONCE, false);
+    if (!skipIncomingOnce) {
+      return false;
+    }
+
+    Svc.PrefBranch.setBoolPref(PREF_RESTORE_SKIP_INCOMING_ONCE, false);
+    logGating("applyRemoteData: consumed restore skip-incoming-once");
+    return true;
+  },
+
+  // ==========================================
   // MAIN SYNC METHODS
   // ==========================================
 
@@ -904,6 +1223,14 @@ SidebarSyncStore.prototype = {
     const win = await getEligibleSyncWindow({ timeoutMs: APPLY_READY_TIMEOUT_MS });
     if (!win) {
       logGating("applyRemoteData: skipping apply (no eligible ready window)");
+      return;
+    }
+
+    if (
+      typeof this._consumeRestoreSkipIncomingOnce === "function" &&
+      this._consumeRestoreSkipIncomingOnce()
+    ) {
+      logGating("applyRemoteData: skipping apply (restore skip-incoming-once)");
       return;
     }
 
@@ -1019,6 +1346,15 @@ SidebarSyncStore.prototype = {
       `Download: ${validRemoteData.workspaces.length} workspaces, ` +
         `${validRemoteData.folders.length} folders, ${validRemoteData.tabs.length} tabs`
     );
+
+    const willMutateLocalState =
+      !applyPolicies.workspaces.skipApply ||
+      !applyPolicies.folders.skipApply ||
+      !applyPolicies.tabs.skipApply;
+
+    if (willMutateLocalState && typeof this._capturePreApplyLocalSnapshot === "function") {
+      await this._capturePreApplyLocalSnapshot(win);
+    }
 
     // IMPORTANT: Ignore tracker changes during apply to prevent immediate re-upload
     // Use both module-level flag and tracker's ignoreAll for safety
@@ -2494,6 +2830,9 @@ SidebarSyncStore.prototype = {
 
     if (id === lazy.SIDEBAR_SYNC_GUID) {
       const data = await this.collectSyncData();
+      if (data && typeof this._captureLastUploadedLocalSnapshot === "function") {
+        await this._captureLastUploadedLocalSnapshot(data);
+      }
       if (data && data.workspaces.length) {
         record.value = data;
       } else {
