@@ -1020,7 +1020,7 @@ SidebarSyncStore.prototype = {
       }
 
       seenIds.add(tab.id);
-      tabs.push(this.syncTab(tab, position, folderId, timestamp));
+      tabs.push(this.syncTab(tab, position, folderId, timestamp, win));
     };
 
     // Helper to recursively collect tabs from folders
@@ -1076,10 +1076,17 @@ SidebarSyncStore.prototype = {
   /**
    * Collect data for a single tab.
    */
-  syncTab(tab, position, folderId, timestamp) {
+  syncTab(tab, position, folderId, timestamp, win) {
     const isEssential = tab.hasAttribute("zen-essential");
 
-    return {
+    let essentialContainerId = 0;
+    if (isEssential && win?.gZenWorkspaces?.containerSpecificEssentials) {
+      const rawContainerId = tab.getAttribute("usercontextid") ?? tab.userContextId ?? 0;
+      const parsedContainerId = Number(rawContainerId);
+      essentialContainerId = Number.isFinite(parsedContainerId) ? parsedContainerId : 0;
+    }
+
+    const syncedTab = {
       // Identity
       id: tab.id,
       // Properties
@@ -1095,6 +1102,12 @@ SidebarSyncStore.prototype = {
       position,
       lastModified: timestamp,
     };
+
+    if (isEssential) {
+      syncedTab.essentialContainerId = essentialContainerId;
+    }
+
+    return syncedTab;
   },
 
   // ==========================================
@@ -1657,7 +1670,8 @@ SidebarSyncStore.prototype = {
     for (const remote of remoteTabs) {
       let key;
       if (remote.isEssential) {
-        key = "essentials";
+        const cid = Number.isFinite(remote.essentialContainerId) ? remote.essentialContainerId : 0;
+        key = `essentials:${cid}`;
       } else if (remote.folderId) {
         key = `folder:${remote.folderId}`;
       } else {
@@ -1677,8 +1691,12 @@ SidebarSyncStore.prototype = {
       // Get container element
       let container;
       let isFolder = false;
-      if (containerId === "essentials") {
-        container = win.gZenWorkspaces?.getEssentialsSection?.(0);
+      if (containerId === "essentials" || containerId.startsWith("essentials:")) {
+        const cid = containerId.startsWith("essentials:")
+          ? Number(containerId.slice("essentials:".length))
+          : 0;
+        const normalizedContainerId = Number.isFinite(cid) ? cid : 0;
+        container = win.gZenWorkspaces?.getEssentialsSection?.(normalizedContainerId);
       } else if (containerId.startsWith("folder:")) {
         const folderId = containerId.replace("folder:", "");
         // Use folderMap first (more reliable), fallback to getElementById
