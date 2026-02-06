@@ -826,6 +826,7 @@ SidebarSyncStore.prototype = {
       }
 
       let folderMap = new Map();
+      let remoteFoldersForLayout = validRemoteData.folders;
       let foldersApplied = true;
       if (applyPolicies.folders.skipApply) {
         foldersApplied = false;
@@ -842,6 +843,9 @@ SidebarSyncStore.prototype = {
         } else if (folderResult && typeof folderResult === "object") {
           if (folderResult.folderMap instanceof Map) {
             folderMap = folderResult.folderMap;
+          }
+          if (Array.isArray(folderResult.remoteFolders)) {
+            remoteFoldersForLayout = folderResult.remoteFolders;
           }
           foldersApplied = folderResult.success !== false;
         }
@@ -872,7 +876,17 @@ SidebarSyncStore.prototype = {
 
       const hasLayoutMaps = folderMap.size > 0 || tabMap.size > 0;
       if ((foldersApplied || tabsApplied) && hasLayoutMaps) {
-        await this.positionMixedTopLevelItems(validRemoteData, win, folderMap, tabMap, {
+        const layoutRemoteData = {
+          ...validRemoteData,
+          folders: remoteFoldersForLayout,
+        };
+
+        await this.positionMixedTopLevelItems(layoutRemoteData, win, folderMap, tabMap, {
+          includeFolders: foldersApplied,
+          includeTabs: tabsApplied,
+        });
+
+        this.positionMixedNestedFolderItems(layoutRemoteData, win, folderMap, tabMap, {
           includeFolders: foldersApplied,
           includeTabs: tabsApplied,
         });
@@ -965,7 +979,10 @@ SidebarSyncStore.prototype = {
       let childPosition = 0;
       for (const item of folder.allItems || []) {
         if (item.isZenFolder) {
-          processFolder(item, childPosition++, folder.id);
+          processFolder(item, childPosition, folder.id);
+        }
+        if (item.isZenFolder || win.gBrowser.isTab(item)) {
+          childPosition++;
         }
       }
     };
@@ -1277,32 +1294,144 @@ SidebarSyncStore.prototype = {
    * @returns {Array} Sorted array with parents before children
    */
   _topologicalSortFolders(folders) {
-    const result = [];
-    const added = new Set();
-    const folderMap = new Map(folders.map((f) => [f.id, f]));
-
-    // Helper to add folder and all its ancestors first
-    const addWithAncestors = (folder) => {
-      if (added.has(folder.id)) {
-        return;
+    const compareFolders = (a, b) => {
+      const byPosition =
+        this._normalizeFiniteNumber(a.position, 0) - this._normalizeFiniteNumber(b.position, 0);
+      if (byPosition !== 0) {
+        return byPosition;
       }
-      // If has parent, add parent first
-      if (folder.parentId && folderMap.has(folder.parentId)) {
-        addWithAncestors(folderMap.get(folder.parentId));
-      }
-      added.add(folder.id);
-      result.push(folder);
+      return a.id.localeCompare(b.id);
     };
 
-    // Sort by position first for stable ordering within same level
-    const sortedByPosition = [...folders].sort((a, b) => a.position - b.position);
+    const allFolders = Array.isArray(folders) ? folders : [];
+    const folderMap = new Map(allFolders.map((folder) => [folder.id, folder]));
+    const childrenByParent = new Map();
 
-    // Add all folders (ancestors will be added first)
-    for (const folder of sortedByPosition) {
-      addWithAncestors(folder);
+    const pushChild = (parentId, folder) => {
+      const key = parentId ?? null;
+      if (!childrenByParent.has(key)) {
+        childrenByParent.set(key, []);
+      }
+      childrenByParent.get(key).push(folder);
+    };
+
+    for (const folder of allFolders) {
+      const parentId = folder.parentId && folderMap.has(folder.parentId) ? folder.parentId : null;
+      pushChild(parentId, folder);
+    }
+
+    for (const children of childrenByParent.values()) {
+      children.sort(compareFolders);
+    }
+
+    const result = [];
+    const visited = new Set();
+    const visit = (folder) => {
+      if (!folder || visited.has(folder.id)) {
+        return;
+      }
+      visited.add(folder.id);
+      result.push(folder);
+
+      const children = childrenByParent.get(folder.id) || [];
+      for (const child of children) {
+        visit(child);
+      }
+    };
+
+    for (const root of childrenByParent.get(null) || []) {
+      visit(root);
+    }
+
+    // Safety fallback for any disconnected/unreachable node.
+    for (const folder of [...allFolders].sort(compareFolders)) {
+      visit(folder);
     }
 
     return result;
+  },
+
+  _sanitizeRemoteFolderGraph(remoteFolders) {
+    const sanitized = (Array.isArray(remoteFolders) ? remoteFolders : []).map((folder) => ({
+      ...folder,
+    }));
+    const folderMap = new Map(sanitized.map((folder) => [folder.id, folder]));
+
+    for (const folder of sanitized) {
+      if (folder.parentId && !folderMap.has(folder.parentId)) {
+        logGating(
+          `folders: parent missing id=${folder.id} parentId=${folder.parentId}, promoting to top-level`
+        );
+        folder.parentId = null;
+      }
+    }
+
+    const stateById = new Map();
+    const stack = [];
+    const stackIndexById = new Map();
+
+    const breakCycle = (cycleIds) => {
+      if (!cycleIds.length) {
+        return;
+      }
+
+      let breakId = cycleIds[0];
+      for (const id of cycleIds) {
+        if (id.localeCompare(breakId) < 0) {
+          breakId = id;
+        }
+      }
+
+      const folderToPromote = folderMap.get(breakId);
+      if (!folderToPromote || folderToPromote.parentId == null) {
+        return;
+      }
+
+      logGating(`folders: cycle detected [${cycleIds.join(",")}] -> break id=${breakId}`);
+      folderToPromote.parentId = null;
+    };
+
+    const visit = (folderId) => {
+      const state = stateById.get(folderId) || 0;
+      if (state === 2) {
+        return;
+      }
+      if (state === 1) {
+        const startIndex = stackIndexById.get(folderId);
+        if (Number.isInteger(startIndex) && startIndex >= 0) {
+          breakCycle(stack.slice(startIndex));
+        }
+        return;
+      }
+
+      stateById.set(folderId, 1);
+      stackIndexById.set(folderId, stack.length);
+      stack.push(folderId);
+
+      const folder = folderMap.get(folderId);
+      const parentId = folder?.parentId;
+      if (parentId && folderMap.has(parentId)) {
+        const parentState = stateById.get(parentId) || 0;
+        if (parentState === 1) {
+          const startIndex = stackIndexById.get(parentId);
+          if (Number.isInteger(startIndex) && startIndex >= 0) {
+            breakCycle(stack.slice(startIndex));
+          }
+        } else {
+          visit(parentId);
+        }
+      }
+
+      stack.pop();
+      stackIndexById.delete(folderId);
+      stateById.set(folderId, 2);
+    };
+
+    for (const folderId of [...folderMap.keys()].sort((a, b) => a.localeCompare(b))) {
+      visit(folderId);
+    }
+
+    return sanitized;
   },
 
   /**
@@ -1330,12 +1459,13 @@ SidebarSyncStore.prototype = {
       }
 
       const validRemote = Array.isArray(remoteFolders) ? remoteFolders : [];
-      const remoteById = new Map(validRemote.map((f) => [f.id, f]));
+      const sanitizedRemote = this._sanitizeRemoteFolderGraph(validRemote);
+      const remoteById = new Map(sanitizedRemote.map((f) => [f.id, f]));
       const knownRemoteSet = new Set(this._normalizeKnownIdList(deletionPolicy.knownIds));
 
       // Topological sort: parents before children
       // This ensures nested folders are created in the right order
-      const sortedRemote = this._topologicalSortFolders(validRemote);
+      const sortedRemote = this._topologicalSortFolders(sanitizedRemote);
 
       const changes = { created: [], updated: [], deleted: [], kept: [] };
 
@@ -1394,11 +1524,11 @@ SidebarSyncStore.prototype = {
         logger.info(`Folders - ${parts.join("; ")}`);
       }
 
-      return { folderMap: localById, success: true };
+      return { folderMap: localById, remoteFolders: sanitizedRemote, success: true };
     } catch (e) {
       logger.error(`Failed to apply folders: ${e.message}`);
       console.error(e);
-      return { folderMap: new Map(), success: false };
+      return { folderMap: new Map(), remoteFolders: [], success: false };
     }
   },
 
@@ -1865,6 +1995,96 @@ SidebarSyncStore.prototype = {
         folderMap,
         tabMap
       );
+    }
+
+    win.gBrowser.tabContainer._invalidateCachedTabs?.();
+  },
+
+  _buildNestedFolderMixedLayout(remoteData, folderId, options = {}) {
+    const includeFolders = options.includeFolders !== false;
+    const includeTabs = options.includeTabs !== false;
+    const items = [];
+
+    if (includeFolders) {
+      for (const folder of remoteData.folders || []) {
+        if (folder.parentId === folderId) {
+          items.push({
+            kind: "folder",
+            id: folder.id,
+            position: this._normalizeFiniteNumber(folder.position, 0),
+          });
+        }
+      }
+    }
+
+    if (includeTabs) {
+      for (const tab of remoteData.tabs || []) {
+        if (tab.folderId === folderId) {
+          items.push({
+            kind: "tab",
+            id: tab.id,
+            position: this._normalizeFiniteNumber(tab.position, 0),
+          });
+        }
+      }
+    }
+
+    items.sort((a, b) => this._compareMixedLayoutItems(a, b));
+    return items;
+  },
+
+  positionMixedNestedFolderItems(
+    remoteData,
+    win,
+    folderMap = new Map(),
+    tabMap = new Map(),
+    options = {}
+  ) {
+    const sortedFolders = this._topologicalSortFolders(remoteData.folders || []);
+
+    for (const remoteFolder of sortedFolders) {
+      const folderElement =
+        folderMap.get(remoteFolder.id) || win.document.getElementById(remoteFolder.id);
+      if (!folderElement) {
+        logGating(`nested-ordering: folder not found id=${remoteFolder.id}`);
+        continue;
+      }
+
+      const layout = this._buildNestedFolderMixedLayout(remoteData, remoteFolder.id, options);
+      if (!layout.length) {
+        continue;
+      }
+
+      const groupContainer = folderElement.groupContainer;
+      if (!groupContainer) {
+        logGating(`nested-ordering: missing groupContainer id=${remoteFolder.id}`);
+        continue;
+      }
+
+      const emptyTab = folderElement.tabs?.find((tab) => tab.hasAttribute("zen-empty-tab")) || null;
+      if (!emptyTab) {
+        logGating(`nested-ordering: missing empty tab id=${remoteFolder.id}`);
+      }
+
+      let previousNode = emptyTab;
+      for (const item of layout) {
+        const node =
+          item.kind === "folder"
+            ? folderMap.get(item.id) || win.document.getElementById(item.id)
+            : tabMap.get(item.id) || win.document.getElementById(item.id);
+
+        if (!node) {
+          logGating(`nested-ordering: missing child ${item.kind} id=${item.id}`);
+          continue;
+        }
+
+        if (previousNode) {
+          previousNode.after(node);
+        } else {
+          groupContainer.insertBefore(node, groupContainer.firstChild);
+        }
+        previousNode = node;
+      }
     }
 
     win.gBrowser.tabContainer._invalidateCachedTabs?.();
