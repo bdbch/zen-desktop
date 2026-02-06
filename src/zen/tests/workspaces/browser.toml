@@ -21,3 +21,7 @@ support-files = [
 ["browser_private_mode_startup.js"]
 ["browser_sidebarsync_payload_validation.js"]
 ["browser_sidebarsync_knownRemoteIds_legacy_no_delete.js"]
+["browser_sidebarsync_sync_ui_copy_prefs.js"]
+["browser_sidebarsync_first_run_bootstrap.js"]
+["browser_sidebarsync_recovery_snapshot_restore.js"]
+["browser_sidebarsync_disable_engine_semantics.js"]
