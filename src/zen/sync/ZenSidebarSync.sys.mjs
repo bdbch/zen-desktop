@@ -1792,8 +1792,7 @@ SidebarSyncStore.prototype = {
 
     const tab = win.gBrowser.addTab(remote.url, options);
 
-    const isWindowSyncEnabled = Services.prefs.getBoolPref("zen.window-sync.enabled", false);
-    if (!isWindowSyncEnabled && this._isNonEmptyString(remote.id)) {
+    if (this._isNonEmptyString(remote.id)) {
       const existingWithRemoteId = win.document.getElementById(remote.id);
       if (!existingWithRemoteId || existingWithRemoteId === tab) {
         tab.id = remote.id;
