@@ -17,9 +17,12 @@ zen-layout-collapsed-toolbar = Collapsed Sidebar
 
 sync-currently-syncing-workspaces = Workspaces
 sync-engine-workspaces =
-    .label = Workspaces
-    .tooltiptext = Sync your workspaces across devices
+    .label = Workspaces (folders, pinned & essential tabs)
+    .tooltiptext = Sync workspace structure and pinned/essential tab URLs across your devices.
     .accesskey = W
+sync-engine-workspaces-description = Sync workspace structure and pinned/essential tab URLs across your devices.
+sync-engine-workspaces-warning = Does not sync regular open (unpinned) tabs or same-device Window Sync state.
+sync-sidebarsync-what-syncs-link = What syncs?
 
 zen-glance-title = Glance
 zen-glance-header = General settings for glance

@@ -2,13 +2,29 @@ diff --git a/browser/components/preferences/sync.inc.xhtml b/browser/components/
 index 4ecdbdb129577165ed0df619577327f7610e138f..761a4d4f26a21ba555b7af180e8a6030615db500 100644
 --- a/browser/components/preferences/sync.inc.xhtml
 +++ b/browser/components/preferences/sync.inc.xhtml
-@@ -223,6 +223,10 @@
+@@ -223,6 +223,26 @@
                      <image class="sync-engine-image sync-engine-prefs" alt=""/>
                      <label data-l10n-id="sync-currently-syncing-settings"/>
                    </html:div>
 +                  <html:div engine_preference="services.sync.engine.sidebarsync">
 +                    <image class="sync-engine-image sync-engine-workspaces" alt=""/>
-+                    <label data-l10n-id="sync-currently-syncing-workspaces"/>
++                    <vbox>
++                      <label data-l10n-id="sync-currently-syncing-workspaces"/>
++                      <html:details class="sync-sidebarsync-what-syncs-details">
++                        <html:summary
++                          class="text-link"
++                          data-l10n-id="sync-sidebarsync-what-syncs-link"
++                        ></html:summary>
++                        <description
++                          class="description-deemphasized"
++                          data-l10n-id="sync-engine-workspaces-description"
++                        />
++                        <description
++                          class="description-deemphasized"
++                          data-l10n-id="sync-engine-workspaces-warning"
++                        />
++                      </html:details>
++                    </vbox>
 +                  </html:div>
                  </html:div>
                  <hbox>
