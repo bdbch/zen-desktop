@@ -32,6 +32,15 @@
 - name: services.sync.engine.sidebarsync.modified
   value: false
 
+- name: services.sync.engine.sidebarsync.bootstrapComplete
+  value: false
+
+- name: services.sync.engine.sidebarsync.bootstrapForceUpload
+  value: false
+
+- name: services.sync.engine.sidebarsync.restoreSkipIncomingOnce
+  value: false
+
 - name: zen.workspaces.separate-essentials
   value: true
 

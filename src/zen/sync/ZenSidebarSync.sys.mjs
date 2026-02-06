@@ -16,7 +16,12 @@ ChromeUtils.defineLazyGetter(lazy, "SIDEBAR_SYNC_GUID", () =>
 // ============== LOGGING ==============
 
 const LOG_PREFIX = "[ZenSidebarSync]";
+const PREF_ENGINE_ENABLED = "services.sync.engine.sidebarsync";
+const PREF_ENGINE_MODIFIED = "engine.sidebarsync.modified";
 const PREF_KNOWN_REMOTE_IDS = "engine.sidebarsync.knownRemoteIds";
+const PREF_BOOTSTRAP_COMPLETE = "engine.sidebarsync.bootstrapComplete";
+const PREF_BOOTSTRAP_FORCE_UPLOAD = "engine.sidebarsync.bootstrapForceUpload";
+const PREF_RESTORE_SKIP_INCOMING_ONCE = "engine.sidebarsync.restoreSkipIncomingOnce";
 const PREF_DEBUG_LOG = "zen.sidebarsync.debug";
 const PREF_TESTONLY = "zen.sidebarsync.testonly";
 
@@ -69,6 +74,82 @@ function logDeletionGuard(msg) {
     logger.info(msg);
   }
 }
+
+function isSidebarSyncEngineEnabled() {
+  return Services.prefs.getBoolPref(PREF_ENGINE_ENABLED, true);
+}
+
+function resetSidebarSyncBookkeepingOnDisable() {
+  Svc.PrefBranch.setBoolPref(PREF_ENGINE_MODIFIED, false);
+  Svc.PrefBranch.setBoolPref(PREF_BOOTSTRAP_COMPLETE, false);
+  Svc.PrefBranch.setBoolPref(PREF_BOOTSTRAP_FORCE_UPLOAD, false);
+  Svc.PrefBranch.setBoolPref(PREF_RESTORE_SKIP_INCOMING_ONCE, false);
+
+  if (Svc.PrefBranch.prefHasUserValue(PREF_KNOWN_REMOTE_IDS)) {
+    Svc.PrefBranch.clearUserPref(PREF_KNOWN_REMOTE_IDS);
+  }
+
+  logger.info("Engine disabled: local sidebar data preserved; bookkeeping reset");
+}
+
+const sidebarSyncPrefStateObserver = {
+  _initialized: false,
+  _lastEnabled: true,
+
+  init() {
+    if (this._initialized) {
+      return;
+    }
+
+    this._initialized = true;
+    this._lastEnabled = isSidebarSyncEngineEnabled();
+    Services.prefs.addObserver(PREF_ENGINE_ENABLED, this);
+    Services.obs.addObserver(this, "profile-before-change");
+
+    if (!this._lastEnabled) {
+      resetSidebarSyncBookkeepingOnDisable();
+    }
+  },
+
+  shutdown() {
+    if (!this._initialized) {
+      return;
+    }
+
+    this._initialized = false;
+    Services.prefs.removeObserver(PREF_ENGINE_ENABLED, this);
+    Services.obs.removeObserver(this, "profile-before-change");
+  },
+
+  observe(_subject, topic, data) {
+    if (topic === "profile-before-change") {
+      this.shutdown();
+      return;
+    }
+
+    if (topic !== "nsPref:changed" || data !== PREF_ENGINE_ENABLED) {
+      return;
+    }
+
+    const enabled = isSidebarSyncEngineEnabled();
+    const wasEnabled = this._lastEnabled;
+    if (enabled === wasEnabled) {
+      return;
+    }
+
+    this._lastEnabled = enabled;
+    if (!enabled && wasEnabled) {
+      resetSidebarSyncBookkeepingOnDisable();
+      return;
+    }
+
+    if (enabled && !wasEnabled) {
+      logger.info("Engine enabled: waiting for bootstrap policy");
+    }
+  },
+};
+
+sidebarSyncPrefStateObserver.init();
 
 function isEligibleWindow(win) {
   try {
@@ -206,6 +287,11 @@ SidebarSyncEngine.prototype = {
 
   async getChangedIDs() {
     const changedIDs = {};
+    if (!isSidebarSyncEngineEnabled()) {
+      logGating("getChangedIDs: skipping upload (engine disabled)");
+      return changedIDs;
+    }
+
     if (!this._tracker.modified) {
       return changedIDs;
     }
@@ -251,6 +337,11 @@ SidebarSyncEngine.prototype = {
   },
 
   async _reconcile(item) {
+    if (!isSidebarSyncEngineEnabled()) {
+      logGating(`Reconcile: rejecting record ${item.id} (engine disabled)`);
+      return false;
+    }
+
     const win = await getEligibleSyncWindow({ timeoutMs: APPLY_READY_TIMEOUT_MS });
     if (!win) {
       // Reject record so Firefox Sync will retry on next sync.
@@ -657,6 +748,11 @@ SidebarSyncStore.prototype = {
    * This is called when uploading local changes.
    */
   async collectSyncData() {
+    if (!isSidebarSyncEngineEnabled()) {
+      logGating("collectSyncData: skipping upload (engine disabled)");
+      return null;
+    }
+
     const win = await getEligibleSyncWindow({ timeoutMs: COLLECT_READY_TIMEOUT_MS });
     if (!win) {
       logGating("collectSyncData: skipping upload (no eligible ready window)");
@@ -686,6 +782,11 @@ SidebarSyncStore.prototype = {
    */
   async applyRemoteData(remoteData) {
     logger.info("applyRemoteData called");
+
+    if (!isSidebarSyncEngineEnabled()) {
+      logGating("applyRemoteData: skipping apply (engine disabled)");
+      return;
+    }
 
     if (!remoteData || typeof remoteData !== "object" || Array.isArray(remoteData)) {
       logger.warn("Skipping apply: invalid root payload (expected object)");
@@ -2314,10 +2415,10 @@ SidebarSyncTracker.prototype = {
   },
 
   get modified() {
-    return Svc.PrefBranch.getBoolPref("engine.sidebarsync.modified", false);
+    return Svc.PrefBranch.getBoolPref(PREF_ENGINE_MODIFIED, false);
   },
   set modified(value) {
-    Svc.PrefBranch.setBoolPref("engine.sidebarsync.modified", value);
+    Svc.PrefBranch.setBoolPref(PREF_ENGINE_MODIFIED, value);
   },
 
   clearChangedIDs() {
