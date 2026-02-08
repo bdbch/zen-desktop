@@ -2,7 +2,7 @@ diff --git a/browser/components/preferences/sync.js b/browser/components/prefere
 index 74bac9130316c03f7f33116ec930503193f60327..302040fc8cbac2a96d4fd9f43f7708c2c430f6f5 100644
 --- a/browser/components/preferences/sync.js
 +++ b/browser/components/preferences/sync.js
-@@ -26,10 +26,15 @@ const SYNC_CONNECTED = 1;
+@@ -26,8 +26,12 @@ const SYNC_CONNECTED = 1;
  const BACKUP_ARCHIVE_ENABLED_PREF_NAME = "browser.backup.archive.enabled";
  const BACKUP_RESTORE_ENABLED_PREF_NAME = "browser.backup.restore.enabled";
  
@@ -28,7 +28,7 @@ index 74bac9130316c03f7f33116ec930503193f60327..302040fc8cbac2a96d4fd9f43f7708c2
      setEventListener("syncNow", "command", function () {
        // syncing can take a little time to send the "started" notification, so
        // pretend we already got it.
-@@ -316,8 +327,80 @@ var gSyncPane = {
+@@ -316,9 +327,112 @@ var gSyncPane = {
        document
          .getElementById("syncNow")
          .setAttribute("tooltiptext", tooltiptext);
